@@ -145,6 +145,7 @@ controller_server:
       yaw_goal_tolerance: 0.25
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
+      # plugin: "my_nav2_controller/MyDWAController"
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
@@ -164,6 +165,8 @@ controller_server:
       vy_samples: 5
       vtheta_samples: 20
       sim_time: 1.7
+      # sim_granularity: 0.05   # for MyDWAController
+      # lethal_cost: 253        # for MyDWAController
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 1.0
@@ -274,9 +277,11 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner/NavfnPlanner"
+      # plugin: "my_nav2_planner/MyAStarPlanner"
       tolerance: 0.5
       use_astar: false
       allow_unknown: true
+      # lethal_cost: 253   # for MyAStarPlanner
 
 smoother_server:
   ros__parameters:
