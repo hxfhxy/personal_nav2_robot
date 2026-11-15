@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "nav2_util/node_utils.hpp"
@@ -101,6 +102,7 @@ double MyDWAController::getYaw(const geometry_msgs::msg::Pose & pose)
   return tf2::getYaw(pose.orientation);
 }
 
+//判断给定世界坐标点是否在局部 costmap 的障碍物里
 bool MyDWAController::inCollision(double wx, double wy) const
 {
   unsigned int mx = 0, my = 0;
@@ -114,6 +116,7 @@ bool MyDWAController::inCollision(double wx, double wy) const
   return cost >= lethal_cost_;
 }
 
+//给定一组候选速度，仿真轨迹，碰撞检测，打分，返回最优速度
 std::vector<Pose2D> MyDWAController::projectTrajectory(
   const Pose2D & start, double vx, double wz) const
 {
@@ -159,30 +162,73 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   const geometry_msgs::msg::PoseStamped & pose,
   const geometry_msgs::msg::Twist & velocity)
 {
-  (void)pose;
-  (void)velocity;
+  geometry_msgs::msg::Twist best;//默认0
 
-  // =====================================================================
-  // 在这里实现局部 DWA。
-  //
-  // 可用成员：
-  //   global_plan_                 全局路径
-  //   min_vel_x_ / max_vel_x_ / max_vel_theta_
-  //   acc_lim_x_ / acc_lim_theta_  加速度，用来收窄本周期速度窗口
-  //   vx_samples_ / vtheta_samples_
-  //   speed_limit_                 setSpeedLimit 之后的线速度上限
-  //   getYaw(pose.pose)
-  //   projectTrajectory(start, vx, wz)  差速前向仿真
-  //   inCollision(x, y)            局部 costmap 碰撞
-  //
-  // 流程建议：
-  //   1. 按加速度把 (vx, wz) 限制在动态窗口内并采样
-  //   2. 每条轨迹 projectTrajectory，碰到 inCollision 就丢
-  //   3. 按贴路径 / 靠近目标 / 前进速度打分
-  //   4. 返回得分最高的 Twist（linear.x, angular.z，linear.y=0）
-  // =====================================================================
+  Pose2D start;
+  start.x = pose.pose.position.x;
+  start.y = pose.pose.position.y;
+  start.yaw = getYaw(pose.pose);
 
-  return geometry_msgs::msg::Twist();
+  //算动态窗口
+  const double dt = 0.2;
+  const double vx_hi = std::min({max_vel_x_, speed_limit_,
+                               velocity.linear.x + acc_lim_x_ * dt});//线速度上边界
+  const double vx_lo = std::max(min_vel_x_,
+                                velocity.linear.x - acc_lim_x_ * dt);//线速度下边界
+  const double wz_hi = std::min(max_vel_theta_,
+                                velocity.angular.z + acc_lim_theta_ * dt);//角速度上边界
+  const double wz_lo = std::max(-max_vel_theta_,
+                                velocity.angular.z - acc_lim_theta_ * dt);//角速度下边界
+  if (vx_lo > vx_hi || wz_lo > wz_hi) {
+    return best;
+  }
+
+  //两层循环采样
+  const int nvx = std::max(1, vx_samples_);
+  const int nwz = std::max(1, vtheta_samples_);
+  double best_score = -std::numeric_limits<double>::infinity();
+  bool found = false;
+  const double vx_step = (nvx > 1) ? (vx_hi - vx_lo) / static_cast<double>(nvx - 1) : 0.0;
+  const double wz_step = (nwz > 1) ? (wz_hi - wz_lo) / static_cast<double>(nwz - 1) : 0.0;
+
+  for (int i = 0; i < nvx; ++i) {
+    const double vx = vx_lo + vx_step * static_cast<double>(i);
+    for (int j = 0; j < nwz; ++j) {
+      const double wz = wz_lo + wz_step * static_cast<double>(j);
+
+      const auto traj = projectTrajectory(start, vx, wz);
+      bool hit = false;
+      for (const auto & p : traj) {
+        if (inCollision(p.x, p.y)) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) continue;
+
+      const auto & end = traj.back();
+      double path_err = std::numeric_limits<double>::infinity();
+      for (const auto & ps : global_plan_.poses) {
+        path_err = std::min(
+          path_err,
+          std::hypot(ps.pose.position.x - end.x,
+                     ps.pose.position.y - end.y));
+      }
+      const double score = -path_err + 0.2 * vx;  // 越大越好
+
+      if (!found || score > best_score) {
+        best_score = score;
+        found = true;
+        best.linear.x = vx;
+        best.angular.z = wz;
+      }
+    }
+  }
+
+  if (!found) {
+    RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000, "DWA found no valid trajectory");
+  }
+  return best;
 }
 
 }  // namespace my_nav2_controller

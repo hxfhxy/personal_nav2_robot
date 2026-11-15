@@ -34,7 +34,7 @@ namespace my_nav2_planner
   }
 
   // 返回 true = 这格不能走。
-  bool MyAstarPlanner::isBlocked(unsigned int mx, unsigned int my) const {
+  bool MyAStarPlanner::isBlocked(unsigned int mx, unsigned int my) const {
     if(mx>=costmap_->getSizeInCellsX() || my>=costmap_->getSizeInCellsY()){
       return true;  // 地图外面
     }
@@ -121,9 +121,9 @@ namespace my_nav2_planner
         return x >= 0 && y >= 0 && x < nx && y < ny;
       };
       if (isBlocked(goal_x, goal_y) && start != goal) {
-        return {};  // 终点在墙里，搜也没用
+        return {};  // 终点在墙里直接return
       }
-      // 八邻域对角距离（octile）：不高估真实步长，A* 才保证最优
+      // 八邻域对角距离octile
       auto heuristic = [&](int x, int y) {
         const int dx = std::abs(x - static_cast<int>(goal_x));
         const int dy = std::abs(y - static_cast<int>(goal_y));
@@ -134,7 +134,7 @@ namespace my_nav2_planner
       const int dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
       const double step[8] = {1, 1, 1, 1, std::sqrt(2.0), std::sqrt(2.0), std::sqrt(2.0), std::sqrt(2.0)};
 
-      // 小根堆：pair.first = f = g+h，pair.second = 格子下标
+      // pair.first = f = g+h，pair.second = 格子下标
       std::priority_queue<std::pair<double, int>,
                           std::vector<std::pair<double, int>>,
                           std::greater<std::pair<double, int>>> open;
@@ -179,8 +179,6 @@ namespace my_nav2_planner
       if (cells.empty() || cells.back() != std::make_pair(start_x, start_y)) return {};
       std::reverse(cells.begin(), cells.end());
       return cells;
-
-      return path;
   }
 }
 
