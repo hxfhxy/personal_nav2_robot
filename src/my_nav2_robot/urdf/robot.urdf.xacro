@@ -13,7 +13,9 @@
   <xacro:property name="wheel_separation" value="0.36"/>
   <xacro:property name="wheel_mass" value="0.5"/>
   <xacro:property name="caster_radius" value="0.03"/>
-  <xacro:property name="chassis_clearance" value="0.02"/>
+  <xacro:property name="chassis_clearance" value="0.04"/>
+  <!-- Box center sits between the axle (x=0) and the rear caster, so the nose cannot drop onto the ground. -->
+  <xacro:property name="chassis_x" value="-0.08"/>
   <xacro:property name="chassis_z" value="${base_height/2 + chassis_clearance - wheel_radius}"/>
 
   <material name="blue">
@@ -39,20 +41,20 @@
 
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 ${chassis_z}" rpy="0 0 0"/>
+      <origin xyz="${chassis_x} 0 ${chassis_z}" rpy="0 0 0"/>
       <geometry>
         <box size="${base_length} ${base_width} ${base_height}"/>
       </geometry>
       <material name="blue"/>
     </visual>
     <collision>
-      <origin xyz="0 0 ${chassis_z}" rpy="0 0 0"/>
+      <origin xyz="${chassis_x} 0 ${chassis_z}" rpy="0 0 0"/>
       <geometry>
         <box size="${base_length} ${base_width} ${base_height}"/>
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 ${chassis_z}" rpy="0 0 0"/>
+      <origin xyz="${chassis_x} 0 ${chassis_z}" rpy="0 0 0"/>
       <mass value="${base_mass}"/>
       <inertia
         ixx="${base_mass/12*(base_width*base_width+base_height*base_height)}" ixy="0" ixz="0"
@@ -96,7 +98,7 @@
     <gazebo reference="${side}_wheel_link">
       <material>Gazebo/Black</material>
       <mu1>1.0</mu1>
-      <mu2>0.1</mu2>
+      <mu2>1.0</mu2>
       <kp>1e6</kp>
       <kd>1.0</kd>
       <minDepth>0.001</minDepth>
@@ -141,12 +143,6 @@
       </geometry>
       <material name="red"/>
     </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="0.03" length="0.04"/>
-      </geometry>
-    </collision>
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.1"/>
@@ -188,8 +184,23 @@
       <odometry_frame>odom</odometry_frame>
       <robot_base_frame>base_footprint</robot_base_frame>
       <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
+      <!-- TF comes from the ground-truth pose below. Wheel odometry slips, and with
+           map locked to odom that slip drags laser hits off the static map. -->
+      <publish_odom_tf>false</publish_odom_tf>
       <publish_wheel_tf>false</publish_wheel_tf>
+    </plugin>
+  </gazebo>
+
+  <!-- Gazebo world pose of base_footprint, republished as odom -> base_footprint. -->
+  <gazebo>
+    <plugin name="ground_truth_p3d" filename="libgazebo_ros_p3d.so">
+      <ros>
+        <remapping>odom:=/ground_truth</remapping>
+      </ros>
+      <body_name>base_footprint</body_name>
+      <frame_name>world</frame_name>
+      <update_rate>50.0</update_rate>
+      <gaussian_noise>0.0</gaussian_noise>
     </plugin>
   </gazebo>
 

@@ -45,6 +45,13 @@ def generate_launch_description():
         }],
         output='screen',
     )
+    ground_truth_tf = Node(
+        package='my_nav2_robot',
+        executable='ground_truth_tf.py',
+        name='ground_truth_tf',
+        parameters=[{'use_sim_time': use_sim_time}],
+        output='screen',
+    )
     spawn_entity = Node(
         package='gazebo_ros',
         executable='spawn_entity.py',
@@ -54,6 +61,7 @@ def generate_launch_description():
             '-x', '0.0', '-y', '0.0', '-z', '0.01',
             '-timeout', '120',
         ],
+        parameters=[{'use_sim_time': use_sim_time}],
         output='screen',
     )
     rviz_node = Node(
@@ -76,6 +84,7 @@ def generate_launch_description():
         gzserver,
         gzclient,
         robot_state_publisher,
+        ground_truth_tf,
         spawn_entity,
         rviz_node,
     ])

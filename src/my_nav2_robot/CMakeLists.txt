@@ -3,6 +3,11 @@ project(my_nav2_robot)
 
 find_package(ament_cmake REQUIRED)
 
+install(PROGRAMS
+  scripts/ground_truth_tf.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY
   launch
   urdf
