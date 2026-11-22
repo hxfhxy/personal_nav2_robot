@@ -1,0 +1,7 @@
+<library path="my_nav2_smoother_lib">
+  <class name="my_nav2_smoother/MyQpSmoother"
+         type="my_nav2_smoother::MyQpSmoother"
+         base_class_type="nav2_core::Smoother">
+    <description>Quadratic program smoother for an A* polyline.</description>
+  </class>
+</library>

@@ -21,12 +21,13 @@ void MyDWAController::configure(
   name_ = name;
   tf_ = tf;
   costmap_ros_ = costmap_ros;
-  costmap_ = costmap_ros->getCostmap();
+  costmap_ = costmap_ros->getCostmap();  // 真正的二维栅格，碰撞检查用这块
 
   auto node = parent.lock();
   logger_ = node->get_logger();
   clock_ = node->get_clock();
 
+  // 参数名带插件实例前缀，对应 yaml 里 FollowPath 下面的键
   auto declare = [&](const std::string & key, auto value) {
       nav2_util::declare_parameter_if_not_declared(node, name + "." + key, rclcpp::ParameterValue(value));
     };
@@ -53,7 +54,7 @@ void MyDWAController::configure(
   int lethal_cost = 253;
   node->get_parameter(name + ".lethal_cost", lethal_cost);
   lethal_cost_ = static_cast<unsigned int>(std::max(0, std::min(lethal_cost, 254)));
-  speed_limit_ = max_vel_x_;
+  speed_limit_ = max_vel_x_;  // 没收到外部限速前，上沿就是最大线速度
 
   RCLCPP_INFO(logger_, "Configuring plugin %s of type MyDWAController", name_.c_str());
 }
@@ -76,13 +77,13 @@ void MyDWAController::deactivate()
 
 void MyDWAController::setPlan(const nav_msgs::msg::Path & path)
 {
-  global_plan_ = path;
+  global_plan_ = path;  // 整段换掉，控制器自己不改这条路径
 }
 
 void MyDWAController::setSpeedLimit(const double & speed_limit, const bool & percentage)
 {
   if (percentage) {
-    speed_limit_ = max_vel_x_ * speed_limit / 100.0;
+    speed_limit_ = max_vel_x_ * speed_limit / 100.0;  // 这时传进来的是百分比，不是 m/s
   } else {
     speed_limit_ = speed_limit;
   }
@@ -92,9 +93,9 @@ geometry_msgs::msg::TwistStamped MyDWAController::makeCmd(
   const geometry_msgs::msg::PoseStamped & pose) const
 {
   geometry_msgs::msg::TwistStamped cmd;
-  cmd.header.stamp = clock_->now();
-  cmd.header.frame_id = pose.header.frame_id;
-  return cmd;
+  cmd.header.stamp = clock_->now();          // 仿真时钟
+  cmd.header.frame_id = pose.header.frame_id;  // 跟当前位姿同一个坐标系
+  return cmd;                                // twist 还是 0
 }
 
 double MyDWAController::getYaw(const geometry_msgs::msg::Pose & pose)
@@ -102,34 +103,36 @@ double MyDWAController::getYaw(const geometry_msgs::msg::Pose & pose)
   return tf2::getYaw(pose.orientation);
 }
 
-//判断给定世界坐标点是否在局部 costmap 的障碍物里
+// 返回 true = 这个点不能走。
 bool MyDWAController::inCollision(double wx, double wy) const
 {
   unsigned int mx = 0, my = 0;
   if (!costmap_->worldToMap(wx, wy, mx, my)) {
-    return true;
+    return true;  // 局部地图外面
   }
   const unsigned char cost = costmap_->getCost(mx, my);
   if (cost == nav2_costmap_2d::NO_INFORMATION) {
-    return false;
+    return false;  // 未知区先当可走，否则没扫到的地方车会停住
   }
+  // 253=贴身膨胀，254=致命障碍，都当撞上。只查中心这一点
   return cost >= lethal_cost_;
 }
 
-//给定一组候选速度，仿真轨迹，碰撞检测，打分，返回最优速度
+// 差速模型向前滚。这一段里 vx、wz 保持不变。
 std::vector<Pose2D> MyDWAController::projectTrajectory(
   const Pose2D & start, double vx, double wz) const
 {
   std::vector<Pose2D> traj;
+  // sim_granularity_ 是时间步长。步数至少 1，避免 sim_time_ 比步长还短
   const int steps = std::max(1, static_cast<int>(std::ceil(sim_time_ / sim_granularity_)));
   const double dt = sim_time_ / static_cast<double>(steps);
   Pose2D p = start;
   traj.reserve(static_cast<size_t>(steps) + 1);
-  traj.push_back(p);
+  traj.push_back(p);  // 起点也放进去，第 0 步就能查出已经在障碍里
   for (int i = 0; i < steps; ++i) {
-    p.x += vx * std::cos(p.yaw) * dt;
+    p.x += vx * std::cos(p.yaw) * dt;  // 沿当前航向走
     p.y += vx * std::sin(p.yaw) * dt;
-    p.yaw += wz * dt;
+    p.yaw += wz * dt;                   // 航向再加上角速度
     traj.push_back(p);
   }
   return traj;
@@ -140,18 +143,19 @@ geometry_msgs::msg::TwistStamped MyDWAController::computeVelocityCommands(
   const geometry_msgs::msg::Twist & velocity,
   nav2_core::GoalChecker * goal_checker)
 {
-  auto cmd = makeCmd(pose);
+  auto cmd = makeCmd(pose);  // 先是零速度，后面只改 twist
 
   if (global_plan_.poses.empty()) {
     RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000, "Empty global plan, commanding zero velocity");
-    return cmd;
+    return cmd;  // 没有路径，停车
   }
 
+  // 到点判断交给 goal_checker，这里不再自己算距离
   const auto & goal_pose = global_plan_.poses.back().pose;
   if (goal_checker != nullptr &&
     goal_checker->isGoalReached(pose.pose, goal_pose, velocity))
   {
-    return cmd;
+    return cmd;  // 已经到了，停车
   }
 
   cmd.twist = computeBestTwist(pose, velocity);
@@ -162,33 +166,33 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   const geometry_msgs::msg::PoseStamped & pose,
   const geometry_msgs::msg::Twist & velocity)
 {
-  geometry_msgs::msg::Twist best;//默认0
+  geometry_msgs::msg::Twist best;  // 默认全 0。一条都选不出来就停车
 
   Pose2D start;
   start.x = pose.pose.position.x;
   start.y = pose.pose.position.y;
   start.yaw = getYaw(pose.pose);
 
-  //算动态窗口
-  const double dt = 0.2;
+  // 动态窗口：当前速度 ± 加速度*dt，再卡在最大速度里
+  const double dt = 0.2;  // 只用来收窗口，不是控制周期
   const double vx_hi = std::min({max_vel_x_, speed_limit_,
-                               velocity.linear.x + acc_lim_x_ * dt});//线速度上边界
+                               velocity.linear.x + acc_lim_x_ * dt});  // 线速度上边界
   const double vx_lo = std::max(min_vel_x_,
-                                velocity.linear.x - acc_lim_x_ * dt);//线速度下边界
+                                velocity.linear.x - acc_lim_x_ * dt);  // 线速度下边界
   const double wz_hi = std::min(max_vel_theta_,
-                                velocity.angular.z + acc_lim_theta_ * dt);//角速度上边界
+                                velocity.angular.z + acc_lim_theta_ * dt);  // 角速度上边界
   const double wz_lo = std::max(-max_vel_theta_,
-                                velocity.angular.z - acc_lim_theta_ * dt);//角速度下边界
+                                velocity.angular.z - acc_lim_theta_ * dt);  // 角速度下边界
   if (vx_lo > vx_hi || wz_lo > wz_hi) {
-    return best;
+    return best;  // 窗口是空的
   }
 
-  //两层循环采样
+  // vx、wz 各自均匀取样，两层循环就是全部候选
   const int nvx = std::max(1, vx_samples_);
   const int nwz = std::max(1, vtheta_samples_);
   double best_score = -std::numeric_limits<double>::infinity();
   bool found = false;
-  const double vx_step = (nvx > 1) ? (vx_hi - vx_lo) / static_cast<double>(nvx - 1) : 0.0;
+  const double vx_step = (nvx > 1) ? (vx_hi - vx_lo) / static_cast<double>(nvx - 1) : 0.0;  // 相邻采样间隔
   const double wz_step = (nwz > 1) ? (wz_hi - wz_lo) / static_cast<double>(nwz - 1) : 0.0;
 
   for (int i = 0; i < nvx; ++i) {
@@ -200,12 +204,13 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
       bool hit = false;
       for (const auto & p : traj) {
         if (inCollision(p.x, p.y)) {
-          hit = true;
+          hit = true;  // 任意一个点撞上，整条丢掉
           break;
         }
       }
       if (hit) continue;
 
+      // 轨迹终点到全局路径最近顶点的距离。点太稀时会被吸到拐角上
       const auto & end = traj.back();
       double path_err = std::numeric_limits<double>::infinity();
       for (const auto & ps : global_plan_.poses) {
@@ -214,19 +219,20 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
           std::hypot(ps.pose.position.x - end.x,
                      ps.pose.position.y - end.y));
       }
-      const double score = -path_err + 0.2 * vx;  // 越大越好
+      const double score = -path_err + 0.2 * vx;  // 越大越好。同样贴线时更愿意往前
 
       if (!found || score > best_score) {
         best_score = score;
         found = true;
-        best.linear.x = vx;
-        best.angular.z = wz;
+        best.linear.x = vx;   // 留下这一对速度
+        best.angular.z = wz;  // 角速度没有单独加分
       }
     }
   }
 
   if (!found) {
     RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000, "DWA found no valid trajectory");
+    // best 还是 0
   }
   return best;
 }
