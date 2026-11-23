@@ -19,6 +19,9 @@ def generate_launch_description():
     gui = LaunchConfiguration('gui')
     use_rviz = LaunchConfiguration('use_rviz')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    x_pose = LaunchConfiguration('x_pose')
+    y_pose = LaunchConfiguration('y_pose')
+    z_pose = LaunchConfiguration('z_pose')
 
     robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
@@ -58,7 +61,7 @@ def generate_launch_description():
         arguments=[
             '-topic', 'robot_description',
             '-entity', 'my_nav2_robot',
-            '-x', '0.0', '-y', '0.0', '-z', '0.01',
+            '-x', x_pose, '-y', y_pose, '-z', z_pose,
             '-timeout', '120',
         ],
         parameters=[{'use_sim_time': use_sim_time}],
@@ -81,6 +84,9 @@ def generate_launch_description():
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('x_pose', default_value='0.0'),
+        DeclareLaunchArgument('y_pose', default_value='0.0'),
+        DeclareLaunchArgument('z_pose', default_value='0.01'),
         gzserver,
         gzclient,
         robot_state_publisher,

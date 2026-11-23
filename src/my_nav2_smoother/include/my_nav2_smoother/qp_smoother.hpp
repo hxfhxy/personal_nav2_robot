@@ -22,7 +22,7 @@ struct Point2D
   double y{0.0};
 };
 
-// Nav2 路径平滑插件：把 A* 折线点当未知数做 QP，起点和终点固定。
+// Nav2 路径平滑插件：QP 求出控制点，再用三次 B 样条画成曲线。起点和终点固定。
 class MyQpSmoother : public nav2_core::Smoother
 {
 public:
@@ -61,13 +61,19 @@ private:
   bool polylineBlocked(
     const nav2_costmap_2d::Costmap2D * costmap,
     const std::vector<Point2D> & points) const;
-  // 在原路径和 QP 结果之间取最靠 QP、又不进墙的一份。
+  // 在原路径和 QP 控制点之间取最靠 QP、曲线又不进墙的一份。
   std::vector<Point2D> blend(
     const nav2_costmap_2d::Costmap2D * costmap,
     const std::vector<Point2D> & smoothed,
     const std::vector<Point2D> & reference) const;
-  // 按 sample_distance_ 重采样。最后一个点保持终点。
+  // 按 sample_distance_ 沿折线重采样。最后一个点保持终点。
   std::vector<Point2D> resample(const std::vector<Point2D> & points) const;
+  // 控制点少于 4 个时退回折线。否则画夹紧的三次 B 样条，再按间距取样。
+  std::vector<Point2D> sampleCurve(const std::vector<Point2D> & controls) const;
+  // 曲线采样点连成的折线是否扫到墙。
+  bool curveBlocked(
+    const nav2_costmap_2d::Costmap2D * costmap,
+    const std::vector<Point2D> & controls) const;
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub_;

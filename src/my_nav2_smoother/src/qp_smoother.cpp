@@ -118,7 +118,7 @@ bool MyQpSmoother::solveLinear(
 
 bool MyQpSmoother::solveAxis(const std::vector<double> & ref, std::vector<double> & out) const
 {
-  const int n = static_cast<int>(ref.size());
+  const int n = static_cast<int>(ref.size());//路径总点数
   const int k = n - 2;  // 去掉固定的首尾，剩下的才是未知数
   if (k <= 0) {
     out = ref;
@@ -237,12 +237,12 @@ std::vector<Point2D> MyQpSmoother::blend(
   if (smoothed.size() != reference.size() || smoothed.empty()) {
     return reference;
   }
-  if (!polylineBlocked(costmap, smoothed)) {
-    return smoothed;  // QP 结果本身能走
+  if (!curveBlocked(costmap, smoothed)) {
+    return smoothed;  // QP 控制点画出的曲线本身能走
   }
-  // 原路径来自 A*。在两者之间取最靠 QP、又不进墙的一份
-  if (polylineBlocked(costmap, reference)) {
-    return reference;  // 原路径也过不去，退回 A*
+  // 原路径来自 A*。在两者之间取最靠 QP、曲线又不进墙的一份
+  if (curveBlocked(costmap, reference)) {
+    return reference;  // 连 A* 点的曲线也过不去，调用处改走折线
   }
 
   double feasible = 0.0;  // 目前知道能走的混合比例
@@ -257,8 +257,8 @@ std::vector<Point2D> MyQpSmoother::blend(
         (1.0 - alpha) * reference[i].x + alpha * smoothed[i].x,
         (1.0 - alpha) * reference[i].y + alpha * smoothed[i].y});
     }
-    if (polylineBlocked(costmap, mixed)) {
-      blocked = alpha;  // 太靠 QP 了，往回退
+    if (curveBlocked(costmap, mixed)) {
+      blocked = alpha;  // 曲线鼓进墙里，往回退
     } else {
       feasible = alpha;
       best = std::move(mixed);  // 还能再靠近一点
@@ -301,6 +301,107 @@ std::vector<Point2D> MyQpSmoother::resample(const std::vector<Point2D> & points)
     out.back() = points.back();
   }
   return out;
+}
+
+namespace
+{
+
+// 夹紧结点：前 degree+1 个和后 degree+1 个重复，曲线过首尾控制点。
+std::vector<double> clampedKnots(int count, int degree)
+{
+  const int knot_count = count + degree + 1;
+  std::vector<double> knots(static_cast<size_t>(knot_count), 0.0);
+  const double end = static_cast<double>(std::max(count - degree, 0));
+  for (int i = 0; i < knot_count; ++i) {
+    if (i <= degree) {
+      knots[static_cast<size_t>(i)] = 0.0;
+    } else if (i >= count) {
+      knots[static_cast<size_t>(i)] = end;  // 尾部重复，保证收到最后一个控制点
+    } else {
+      knots[static_cast<size_t>(i)] = static_cast<double>(i - degree);
+    }
+  }
+  return knots;
+}
+
+// Cox-de Boor。分母为 0 的项丢掉。u 等于最后一个结点时算进最后一段。
+double bsplineBasis(int i, int degree, double u, const std::vector<double> & knots)
+{
+  if (degree == 0) {
+    const double left = knots[static_cast<size_t>(i)];
+    const double right = knots[static_cast<size_t>(i + 1)];
+    if (left <= u && u < right) {
+      return 1.0;
+    }
+    if (u == knots.back() && left < right && right == knots.back()) {
+      return 1.0;  // 终点落在半开区间外面，补进最后一段
+    }
+    return 0.0;
+  }
+  double value = 0.0;
+  const double left_span = knots[static_cast<size_t>(i + degree)] - knots[static_cast<size_t>(i)];
+  if (left_span > 1e-12) {
+    value += (u - knots[static_cast<size_t>(i)]) / left_span *
+      bsplineBasis(i, degree - 1, u, knots);
+  }
+  const double right_span =
+    knots[static_cast<size_t>(i + degree + 1)] - knots[static_cast<size_t>(i + 1)];
+  if (right_span > 1e-12) {
+    value += (knots[static_cast<size_t>(i + degree + 1)] - u) / right_span *
+      bsplineBasis(i + 1, degree - 1, u, knots);
+  }
+  return value;
+}
+
+Point2D evalBspline(
+  const std::vector<Point2D> & controls, double u, const std::vector<double> & knots, int degree)
+{
+  Point2D point{0.0, 0.0};
+  for (int i = 0; i < static_cast<int>(controls.size()); ++i) {
+    const double weight = bsplineBasis(i, degree, u, knots);
+    point.x += weight * controls[static_cast<size_t>(i)].x;
+    point.y += weight * controls[static_cast<size_t>(i)].y;
+  }
+  return point;
+}
+
+}  // namespace
+
+std::vector<Point2D> MyQpSmoother::sampleCurve(const std::vector<Point2D> & controls) const
+{
+  if (controls.size() < 4) {
+    return resample(controls);  // 三次曲线至少要 4 个控制点
+  }
+  const int degree = 3;
+  const auto knots = clampedKnots(static_cast<int>(controls.size()), degree);
+  const double u0 = knots[static_cast<size_t>(degree)];
+  const double u1 = knots[controls.size()];  // 参数走到这里就是终点
+
+  double polygon = 0.0;
+  for (size_t i = 1; i < controls.size(); ++i) {
+    polygon += std::hypot(
+      controls[i].x - controls[i - 1].x, controls[i].y - controls[i - 1].y);
+  }
+  // 先密采，再交给 resample 拉成 sample_distance_
+  const int count = std::max(
+    static_cast<int>(controls.size()),
+    static_cast<int>(std::ceil(polygon / std::max(sample_distance_ * 0.5, 1e-3))));
+  std::vector<Point2D> dense;
+  dense.reserve(static_cast<size_t>(count) + 1);
+  for (int k = 0; k <= count; ++k) {
+    const double u = u0 + (u1 - u0) * static_cast<double>(k) / static_cast<double>(count);
+    dense.push_back(evalBspline(controls, u, knots, degree));
+  }
+  dense.front() = controls.front();  // 夹紧：起点就是第一个控制点
+  dense.back() = controls.back();    // 终点就是最后一个控制点
+  return resample(dense);
+}
+
+bool MyQpSmoother::curveBlocked(
+  const nav2_costmap_2d::Costmap2D * costmap,
+  const std::vector<Point2D> & controls) const
+{
+  return polylineBlocked(costmap, sampleCurve(controls));
 }
 
 bool MyQpSmoother::smooth(
@@ -372,8 +473,11 @@ bool MyQpSmoother::smooth(
       // 地图还没到，先不查碰撞
     }
   }
-  const auto feasible = blend(costmap, smoothed, reference);
-  const auto samples = resample(feasible);
+  const auto controls = blend(costmap, smoothed, reference);  // 这些点是 B 样条控制点，曲线不一定穿过中间点
+  auto samples = sampleCurve(controls);
+  if (polylineBlocked(costmap, samples)) {
+    samples = resample(reference);  // 曲线鼓进墙里，退回 A* 折线
+  }
 
   path.poses.clear();
   path.poses.reserve(samples.size());

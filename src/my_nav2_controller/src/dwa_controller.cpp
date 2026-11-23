@@ -36,7 +36,7 @@ void MyDWAController::configure(
   declare("max_vel_theta", 1.0);
   declare("acc_lim_x", 2.5);
   declare("acc_lim_theta", 3.2);
-  declare("sim_time", 1.7);
+  declare("sim_time", 0.8);
   declare("sim_granularity", 0.05);
   declare("vx_samples", 20);
   declare("vtheta_samples", 20);
@@ -78,6 +78,7 @@ void MyDWAController::deactivate()
 void MyDWAController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;  // 整段换掉，控制器自己不改这条路径
+  plan_index_ = 0;      // 新路径从头对齐
 }
 
 void MyDWAController::setSpeedLimit(const double & speed_limit, const bool & percentage)
@@ -101,6 +102,94 @@ geometry_msgs::msg::TwistStamped MyDWAController::makeCmd(
 double MyDWAController::getYaw(const geometry_msgs::msg::Pose & pose)
 {
   return tf2::getYaw(pose.orientation);
+}
+
+double MyDWAController::normAngle(double angle)
+{
+  while (angle > M_PI) {
+    angle -= 2.0 * M_PI;
+  }
+  while (angle < -M_PI) {
+    angle += 2.0 * M_PI;
+  }
+  return angle;
+}
+
+void MyDWAController::advancePlanIndex(double x, double y)
+{
+  const auto & poses = global_plan_.poses;
+  const size_t n = poses.size();
+  if (n == 0) {
+    return;
+  }
+  if (plan_index_ >= n) {
+    plan_index_ = n - 1;
+  }
+
+  // 只在前方一小段里找最近点。整条路径最近会把车吸回身后，或吸到旁边走廊
+  double best = std::hypot(
+    poses[plan_index_].pose.position.x - x,
+    poses[plan_index_].pose.position.y - y);
+  size_t best_i = plan_index_;
+  double walked = 0.0;
+  for (size_t i = plan_index_ + 1; i < n && walked < 1.5; ++i) {
+    const auto & prev = poses[i - 1].pose.position;
+    const auto & cur = poses[i].pose.position;
+    walked += std::hypot(cur.x - prev.x, cur.y - prev.y);
+    const double d = std::hypot(cur.x - x, cur.y - y);
+    if (d < best) {
+      best = d;
+      best_i = i;
+    }
+  }
+  plan_index_ = best_i;
+}
+
+void MyDWAController::matchAhead(double x, double y, double & dist, double & yaw) const
+{
+  const auto & poses = global_plan_.poses;
+  const size_t n = poses.size();
+  dist = std::numeric_limits<double>::infinity();
+  yaw = 0.0;
+  if (n == 0) {
+    return;
+  }
+
+  const size_t i0 = std::min(plan_index_, n - 1);
+  if (i0 + 1 >= n) {
+    dist = std::hypot(poses.back().pose.position.x - x, poses.back().pose.position.y - y);
+    yaw = getYaw(poses.back().pose);  // 只剩终点，用目标朝向
+    return;
+  }
+
+  double walked = 0.0;
+  for (size_t i = i0; i + 1 < n && walked < 1.5; ++i) {
+    const double ax = poses[i].pose.position.x;
+    const double ay = poses[i].pose.position.y;
+    const double bx = poses[i + 1].pose.position.x;
+    const double by = poses[i + 1].pose.position.y;
+    const double dx = bx - ax;
+    const double dy = by - ay;
+    const double len2 = dx * dx + dy * dy;
+    walked += std::sqrt(len2);
+
+    double t = 0.0;
+    if (len2 > 1e-8) {
+      t = std::clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0.0, 1.0);  // 垂足落在线段上
+    }
+    const double d = std::hypot(x - (ax + t * dx), y - (ay + t * dy));
+    if (d >= dist) {
+      continue;
+    }
+    dist = d;
+    if (i + 1 == n - 1 && t > 0.5) {
+      yaw = getYaw(poses.back().pose);  // 贴到终点这一段，用目标朝向
+    } else if (len2 > 1e-8) {
+      yaw = std::atan2(dy, dx);  // 这段路径往哪指
+    } else {
+      yaw = getYaw(poses[i].pose);
+    }
+  }
 }
 
 // 返回 true = 这个点不能走。
@@ -172,6 +261,7 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   start.x = pose.pose.position.x;
   start.y = pose.pose.position.y;
   start.yaw = getYaw(pose.pose);
+  advancePlanIndex(start.x, start.y);  // 这一拍先对齐到前方路径，采样都用这个下标
 
   // 动态窗口：当前速度 ± 加速度*dt，再卡在最大速度里
   const double dt = 0.2;  // 只用来收窗口，不是控制周期
@@ -210,22 +300,21 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
       }
       if (hit) continue;
 
-      // 轨迹终点到全局路径最近顶点的距离。点太稀时会被吸到拐角上
+      // 终点到前方路径的横向距离。不再和整条路径的顶点比，否则会左右来回追
       const auto & end = traj.back();
-      double path_err = std::numeric_limits<double>::infinity();
-      for (const auto & ps : global_plan_.poses) {
-        path_err = std::min(
-          path_err,
-          std::hypot(ps.pose.position.x - end.x,
-                     ps.pose.position.y - end.y));
-      }
-      const double score = -path_err + 0.2 * vx;  // 越大越好。同样贴线时更愿意往前
+      double path_err = 0.0;
+      double path_yaw = 0.0;
+      matchAhead(end.x, end.y, path_err, path_yaw);
+      const double heading_err = std::abs(normAngle(end.yaw - path_yaw));  // 终点朝向和路径差多少
+      // 朝向用平方：小偏差还能修正，大角度跨过路径就亏。0.05*|wz| 让差不多的轨迹挑更直的
+      const double score =
+        -path_err - 0.5 * heading_err * heading_err - 0.05 * std::abs(wz) + 0.8 * vx;
 
       if (!found || score > best_score) {
         best_score = score;
         found = true;
         best.linear.x = vx;   // 留下这一对速度
-        best.angular.z = wz;  // 角速度没有单独加分
+        best.angular.z = wz;
       }
     }
   }

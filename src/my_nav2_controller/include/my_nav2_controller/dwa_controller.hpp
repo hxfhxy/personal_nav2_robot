@@ -55,6 +55,11 @@ protected:
   static double getYaw(const geometry_msgs::msg::Pose & pose);  // 四元数转航向角
   // 点是否不可走：越界、代价 >= lethal_cost_ 都算撞上。未知格子暂当可走。
   bool inCollision(double wx, double wy) const;
+  static double normAngle(double angle);  // 收到 (-pi, pi]
+  // 车走到哪了。只在 plan_index_ 往前约 1.5 m 里找，避免吸到身后或另一条走廊
+  void advancePlanIndex(double x, double y);
+  // 点到前方折线的距离，以及这段路径的朝向
+  void matchAhead(double x, double y, double & dist, double & yaw) const;
   // vx、wz 不变，向前滚 sim_time_ 秒，返回轨迹点。
   std::vector<Pose2D> projectTrajectory(
     const Pose2D & start, double vx, double wz) const;
@@ -70,6 +75,7 @@ protected:
   nav2_costmap_2d::Costmap2D * costmap_{nullptr};  // 局部代价地图（栅格）
   std::string name_;                               // 插件实例名，对应 yaml 里 FollowPath
   nav_msgs::msg::Path global_plan_;                // 当前要跟的全局路径
+  size_t plan_index_{0};                           // 车上一次对齐到的路径点，只往前走
   rclcpp::Logger logger_{rclcpp::get_logger("MyDWAController")};
   rclcpp::Clock::SharedPtr clock_;
 
@@ -78,7 +84,7 @@ protected:
   double max_vel_theta_{1.0};      // 角速度上限，rad/s
   double acc_lim_x_{2.5};          // 线加速度，收动态窗口用
   double acc_lim_theta_{3.2};      // 角加速度
-  double sim_time_{1.7};           // 每条轨迹向前看多久
+  double sim_time_{0.8};           // 每条轨迹向前看多久。太长时终点离开弯道，高速候选被丢掉
   double sim_granularity_{0.05};   // 轨迹点的时间间隔，秒
   int vx_samples_{20};             // 线速度采样数
   int vtheta_samples_{20};         // 角速度采样数

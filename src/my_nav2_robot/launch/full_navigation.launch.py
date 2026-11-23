@@ -5,7 +5,7 @@ import tempfile
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
-                            TimerAction)
+                            OpaqueFunction, TimerAction)
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -14,28 +14,66 @@ from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml
 
 
-def _cache_map_files(pkg_share):
-    """Copy map files to /tmp so nav2 RewrittenYaml does not corrupt non-ASCII paths."""
+def _cache_map(map_yaml):
+    """Copy a map next to its image under /tmp.
+
+    nav2 RewrittenYaml corrupts non-ASCII paths, and the workspace path is Chinese.
+    """
+    map_yaml = os.path.abspath(map_yaml)
     cache_dir = os.path.join(tempfile.gettempdir(), 'my_nav2_robot_map')
     os.makedirs(cache_dir, exist_ok=True)
-    for map_file in ('playground.yaml', 'playground.pgm'):
-        source = os.path.join(pkg_share, 'maps', map_file)
-        if os.path.exists(source):
-            shutil.copy2(source, os.path.join(cache_dir, map_file))
-    return os.path.join(cache_dir, 'playground.yaml')
+    image_name = os.path.basename(map_yaml).replace('.yaml', '.pgm')
+    with open(map_yaml, 'r', encoding='utf-8') as source:
+        lines = source.readlines()
+    for line in lines:
+        if line.startswith('image:'):
+            image_name = line.split(':', 1)[1].strip()
+            break
+    image_path = image_name if os.path.isabs(image_name) else os.path.join(
+        os.path.dirname(map_yaml), image_name)
+    cached_image = os.path.basename(image_path)
+    cached_yaml = os.path.join(cache_dir, os.path.basename(map_yaml))
+    shutil.copy2(image_path, os.path.join(cache_dir, cached_image))
+    with open(cached_yaml, 'w', encoding='utf-8') as target:
+        for line in lines:
+            if line.startswith('image:'):
+                target.write(f'image: {cached_image}\n')
+            else:
+                target.write(line)
+    return cached_yaml
 
 
-def generate_launch_description():
+def _scene_paths(context, pkg_share):
+    """Pick the Gazebo world, map, and spawn for playground or house."""
+    scene = LaunchConfiguration('scene').perform(context).strip()
+    world_override = LaunchConfiguration('world').perform(context).strip()
+    map_override = LaunchConfiguration('map').perform(context).strip()
+    if scene == 'house':
+        world = os.path.join(
+            get_package_share_directory('turtlebot3_gazebo'),
+            'worlds', 'turtlebot3_house.world')
+        map_yaml = os.path.join(pkg_share, 'maps', 'house.yaml')
+        x_pose, y_pose = '-2.0', '-0.8'
+    else:
+        world = os.path.join(pkg_share, 'worlds', 'playground.sdf')
+        map_yaml = os.path.join(pkg_share, 'maps', 'playground.yaml')
+        x_pose, y_pose = '0.0', '0.0'
+    if world_override:
+        world = world_override
+    if map_override:
+        map_yaml = map_override
+    return world, _cache_map(map_yaml), x_pose, y_pose
+
+
+def _launch_setup(context):
     pkg_share = get_package_share_directory('my_nav2_robot')
     nav2_bringup = get_package_share_directory('nav2_bringup')
-    default_map = _cache_map_files(pkg_share)
+    world, map_yaml, x_pose, y_pose = _scene_paths(context, pkg_share)
 
     slam = LaunchConfiguration('slam')
-    world = LaunchConfiguration('world')
     gui = LaunchConfiguration('gui')
     rviz = LaunchConfiguration('rviz')
     use_sim_time = LaunchConfiguration('use_sim_time')
-    map_yaml = LaunchConfiguration('map')
     params_file = LaunchConfiguration('params_file')
 
     nav2_launch_dir = os.path.join(nav2_bringup, 'launch')
@@ -59,6 +97,8 @@ def generate_launch_description():
             'gui': gui,
             'use_rviz': 'false',
             'use_sim_time': use_sim_time,
+            'x_pose': x_pose,
+            'y_pose': y_pose,
         }.items(),
     )
 
@@ -127,26 +167,38 @@ def generate_launch_description():
         output='screen',
     )
 
+    return [
+        gazebo_sim,
+        static_map_to_odom,
+        TimerAction(period=5.0, actions=[map_server, map_lifecycle, navigation, slam_cmd]),
+        rviz_node,
+    ]
+
+
+def generate_launch_description():
+    pkg_share = get_package_share_directory('my_nav2_robot')
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'scene',
+            default_value='playground',
+            description='playground: four boxes. house: turtlebot3 house.'),
         DeclareLaunchArgument(
             'slam',
             default_value='False',
             description='True: slam_toolbox mapping. False: map_server, no AMCL.'),
         DeclareLaunchArgument(
             'world',
-            default_value=os.path.join(pkg_share, 'worlds', 'playground.sdf')),
+            default_value='',
+            description='Override the scene world. Empty uses scene.'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument(
             'map',
-            default_value=default_map,
-            description='Map YAML. Copied to /tmp to avoid non-ASCII RewrittenYaml bugs.'),
+            default_value='',
+            description='Override the scene map YAML. Empty uses scene.'),
         DeclareLaunchArgument(
             'params_file',
             default_value=os.path.join(pkg_share, 'config', 'nav2_params.yaml')),
-        gazebo_sim,
-        static_map_to_odom,
-        TimerAction(period=5.0, actions=[map_server, map_lifecycle, navigation, slam_cmd]),
-        rviz_node,
+        OpaqueFunction(function=_launch_setup),
     ])
