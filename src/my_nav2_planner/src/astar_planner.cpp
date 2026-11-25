@@ -1,3 +1,6 @@
+// 全局规划：栅格 A*。
+// 输入 map 系下的起点、终点位姿，输出 nav_msgs::Path，每个点是格子中心的世界坐标。
+// 只读全局代价地图，不改它；这里不做平滑，折线交给 my_nav2_smoother 变成曲线。
 #include "my_nav2_planner/astar_planner.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "pluginlib/class_list_macros.hpp"

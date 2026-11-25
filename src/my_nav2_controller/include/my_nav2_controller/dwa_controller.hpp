@@ -1,3 +1,6 @@
+// MyDWAController：Nav2 局部控制插件（对应 yaml 里的 FollowPath）。
+// 声明 FollowPath 会调用的接口，以及动态窗口采样、轨迹前推、打分这几个内部函数。
+
 #ifndef MY_NAV2_CONTROLLER__DWA_CONTROLLER_HPP_
 #define MY_NAV2_CONTROLLER__DWA_CONTROLLER_HPP_
 

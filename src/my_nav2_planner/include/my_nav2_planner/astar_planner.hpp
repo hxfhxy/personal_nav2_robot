@@ -1,3 +1,6 @@
+// MyAStarPlanner：Nav2 全局规划插件（对应 yaml 里的 GridBased）。
+// 声明生命周期回调、行为树调用的 createPlan，以及内部的栅格 A* 和可走性判断。
+
 #ifndef MY_NAV2_PLANNER__ASTAR_PLANNER_HPP_
 #define MY_NAV2_PLANNER__ASTAR_PLANNER_HPP_
 

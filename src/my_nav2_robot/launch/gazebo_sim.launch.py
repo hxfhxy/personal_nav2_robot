@@ -1,3 +1,8 @@
+"""启动 Gazebo Classic、加载 URDF、把车生成到指定位置，并发布真值 TF。
+
+不含地图和 Nav2，可以单独用来验证模型、雷达和 TF 是否正常。
+"""
+
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -25,6 +30,7 @@ def generate_launch_description():
 
     robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
+    # 同一时间只能有一个 gzserver，旧进程占着端口时新的会马上退出
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(gazebo_ros_pkg, 'launch', 'gzserver.launch.py')),
@@ -48,6 +54,7 @@ def generate_launch_description():
         }],
         output='screen',
     )
+    # 用 Gazebo 真值位姿发 odom -> base_footprint，替掉会打滑的轮式里程计
     ground_truth_tf = Node(
         package='my_nav2_robot',
         executable='ground_truth_tf.py',

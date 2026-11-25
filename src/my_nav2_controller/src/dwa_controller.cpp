@@ -1,3 +1,6 @@
+// 局部控制：DWA。
+// 每个控制周期按当前速度开动态窗口，采样 (vx, wz)，各自向前滚一条 sim_time_ 长的轨迹；
+// 撞墙的直接丢掉，剩下的按「离前方路径多远 + 朝向差多少 + 速度大小」打分，取最高的一组。
 #include "my_nav2_controller/dwa_controller.hpp"
 
 #include <algorithm>

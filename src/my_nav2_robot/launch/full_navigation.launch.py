@@ -1,3 +1,9 @@
+"""完整导航入口。
+
+串起 Gazebo、robot_state_publisher、真值 TF、GICP 雷达前端、Nav2 和 RViz。
+`slam:=True` 时用 slam_toolbox 取代 map_server 和固定的 map -> odom。
+"""
+
 import os
 import shutil
 import tempfile
@@ -123,6 +129,8 @@ def _launch_setup(context):
         }],
         condition=UnlessCondition(slam),
     )
+    # Nav2 的 planner / controller / smoother 都自己起，但行为树里的插件名还是官方的，
+    # 实际调用哪个类由 config/nav2_params.yaml 的 plugin: 决定。
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_launch_dir, 'navigation_launch.py')),
@@ -157,6 +165,20 @@ def _launch_setup(context):
         condition=UnlessCondition(slam),
     )
 
+    # 相邻两帧 /points 做 GICP。结果在 lidar_odom，不改 map -> odom。
+    gicp_frontend = Node(
+        package='my_nav2_frontend',
+        executable='gicp_frontend',
+        name='gicp_frontend',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'points_topic': '/points',
+            'ground_truth_topic': '/ground_truth',
+            'voxel_leaf': 0.15,
+        }],
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -169,6 +191,7 @@ def _launch_setup(context):
 
     return [
         gazebo_sim,
+        gicp_frontend,
         static_map_to_odom,
         TimerAction(period=5.0, actions=[map_server, map_lifecycle, navigation, slam_cmd]),
         rviz_node,

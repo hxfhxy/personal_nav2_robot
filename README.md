@@ -14,6 +14,8 @@ sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
   ros-humble-slam-toolbox ros-humble-gazebo-ros-pkgs
 ```
 
+`my_nav2_frontend` 用的 `small_gicp` 由 CMake 的 `FetchContent` 从 GitHub 拉 `v1.0.0`，第一次 `colcon build` 要联网，之后走 `build/` 里的缓存。这个包模板代码多，第一次编译要几十秒。
+
 ## 目录
 
 | 包 | 内容 |
@@ -22,6 +24,7 @@ sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
 | `my_nav2_planner` | 全局规划插件 `my_nav2_planner/MyAStarPlanner` |
 | `my_nav2_controller` | 局部控制插件 `my_nav2_controller/MyDWAController` |
 | `my_nav2_smoother` | 路径平滑插件 `my_nav2_smoother/MyQpSmoother` |
+| `my_nav2_frontend` | 雷达前端 `gicp_frontend`：相邻帧 GICP，发布 `/lidar_odom` |
 
 行为树里的插件名仍是 `GridBased` 和 `FollowPath`，对应关系写在 `config/nav2_params.yaml` 的 `plugin:` 上。
 
@@ -100,11 +103,23 @@ ros2 launch my_nav2_robot gazebo_sim.launch.py use_rviz:=true
 
 ### 建图
 
-`slam:=True` 时启动 slam_toolbox，不发布固定的 `map → odom`，也不开 map_server。在 RViz 里用键盘或速度指令把车开起来，地图才会扫出来。
+`slam:=True` 时启动 slam_toolbox，不发布固定的 `map → odom`，也不开 map_server。slam_toolbox 仍订阅二维 `/scan`，当前雷达只发 `/points`，这个模式扫不出地图。
 
 ```bash
 ros2 launch my_nav2_robot full_navigation.launch.py slam:=True
 ```
+
+## 话题
+
+| 话题 | 类型 | 谁发 | 说明 |
+| --- | --- | --- | --- |
+| `/points` | `sensor_msgs/PointCloud2` | Gazebo 雷达插件 | 16 线 × 720，10 Hz |
+| `/ground_truth` | `nav_msgs/Odometry` | `libgazebo_ros_p3d` | 世界系真值位姿，只用来对照 |
+| `/odom` | `nav_msgs/Odometry` | 差速轮插件 | 只有速度，不发 TF |
+| `/lidar_odom` | `nav_msgs/Odometry` | `gicp_frontend` | 帧间 GICP 累积出的位姿 |
+| `/cmd_vel` | `geometry_msgs/Twist` | Nav2 控制器 | 下给差速轮 |
+| `/plan` | `nav_msgs/Path` | 全局规划 | A* 出来再被 QP 平滑的路径 |
+| `/map` | `nav_msgs/OccupancyGrid` | `map_server` | 静态地图，不启 AMCL |
 
 ## 坐标系
 
@@ -119,13 +134,15 @@ map → odom → base_footprint → base_link → laser_link
 | `/odom` | 差速轮插件 | 只提供速度，`publish_odom_tf` 为 false |
 | `base_footprint` 以下 | `robot_state_publisher` | 固定关节，雷达在 `laser_link` |
 
+`lidar_odom → lidar_base` 是另一条独立的链，根节点是 `lidar_odom`，和上面这棵树不相连。GICP 前端只在自己这条链上累积位姿，不参与 `map → odom`；`lidar_base` 是虚拟的雷达坐标系，不对应 URDF 里的任何 link。
+
 轮式里程计会打滑。地图又钉在 `odom` 上时，打滑会把激光点拖离墙面，代价地图就在空白处留下障碍。仿真阶段因此改用真值位姿。
 
 ## 车和雷达
 
-差速两轮加后万向轮，车体约 0.40 m × 0.30 m × 0.15 m，轮半径 0.06 m。二维雷达水平安装，话题 `/scan`，消息类型 `sensor_msgs/LaserScan`，量程 0.12–8.0 m。
+差速两轮加后万向轮，车体约 0.40 m × 0.30 m × 0.15 m，轮半径 0.06 m。16 线三维雷达水平安装，水平 360°，垂直 ±15°，话题 `/points`，消息类型 `sensor_msgs/PointCloud2`，量程 0.30–12.0 m。
 
-底盘中心在轮轴后方 0.08 m，离地间隙 0.04 m。重心若压在轮轴上，车头会压到地面，雷达跟着低头，2.5 m 以内的回波打在地面和车身上。
+底盘中心在轮轴后方 0.08 m，离地间隙 0.04 m。下沿波束会打到地面。代价地图只把高度 0.10 m 以上的点当成障碍。
 
 ## 现在用的模块
 
@@ -134,6 +151,7 @@ map → odom → base_footprint → base_link → laser_link
 | 全局规划 `GridBased` | `my_nav2_planner/MyAStarPlanner` |
 | 局部控制 `FollowPath` | `my_nav2_controller/MyDWAController` |
 | 路径平滑 `qp_smoother` | `my_nav2_smoother/MyQpSmoother` |
+| 雷达前端 | `my_nav2_frontend` 的 `gicp_frontend`，发布 `/lidar_odom` |
 | 恢复 | `Spin`、`BackUp`、`Wait` 等官方行为 |
 | 地图 | `map_server`，不启 AMCL |
 | 建图 | `slam_toolbox`，仅 `slam:=True` 时启动 |
@@ -147,6 +165,8 @@ A* 在全局代价地图上做八邻域搜索。代价大于等于 253（贴身�
 平滑在 A* 和 DWA 之间。未知数就是折线上的路径点，x 和 y 各解一次。代价是两项二次项：路径点贴近原来的 A* 点，以及相邻三点的二阶差分 `x_{i-1} - 2 x_i + x_{i+1}`。起点和终点固定，所以这个 QP 变成线性方程组。解出的点再当作三次 B 样条的控制点，夹紧结点让曲线从起点收到终点。曲线扫进代价大于等于 253 的格子，就把控制点往原路径退；仍然进墙就退回 A* 折线。输出按 0.1 m 取样，并给每个点补上沿路径的朝向。
 
 DWA 按当前速度和加速度开动态窗口，采样 `(vx, wz)`，向前滚约 0.8 s。轨迹上任一点的代价到 253 就丢掉这条轨迹。碰撞只查车体中心。打分看终点离前方路径有多远、朝向差多少，再加一点线速度奖励，并稍微偏向更直的角速度。还没有离障碍远近和足迹碰撞。
+
+雷达前端订阅 `/points`。PCL 的 `VoxelGrid` 按 0.15 m 降采样，`small_gicp` 的 GICP 把当前帧对齐到上一帧，得到一个 `Eigen::Isometry3d`。这些增量乘起来发到 `/lidar_odom`，坐标系是 `lidar_odom → lidar_base`，不接到 `map`。终端里会拿同一段时间的 `/ground_truth` 位移做对照。
 
 代价地图两边都是静态层、激光障碍层和膨胀层。膨胀半径 0.55 m。激光标记距离 2.5 m，清除距离 3.0 m。A* 只把 253 及以上当成墙，膨胀层里大部分格子仍然可走。局部代价地图是 `odom` 下 4 m × 4 m 的滚动窗口。
 

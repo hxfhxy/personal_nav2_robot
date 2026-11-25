@@ -1,3 +1,5 @@
+"""只发 robot_description 和关节状态，在 RViz 里看车体模型，不启动 Gazebo。"""
+
 import os
 
 from ament_index_python.packages import get_package_share_directory

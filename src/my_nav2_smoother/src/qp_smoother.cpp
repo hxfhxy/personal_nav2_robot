@@ -1,3 +1,7 @@
+// 路径平滑：一维 QP + 三次 B 样条。
+// 未知数是折线上的中间点（首尾固定），代价 = 贴近原 A* 点 + 相邻三点的二阶差分。
+// 两项都是二次的，正规方程化成线性方程组，用高斯消元解。解出的点当 B 样条控制点，
+// 夹紧结点让曲线从起点收到终点；曲线鼓进墙里就按比例往原路径退。
 #include "my_nav2_smoother/qp_smoother.hpp"
 
 #include <algorithm>
@@ -193,7 +197,7 @@ bool MyQpSmoother::segmentBlocked(
 
   const double resolution = std::max(costmap->getResolution(), 1e-3);
   const double length = std::hypot(x1 - x0, y1 - y0);
-  const int steps = std::max(1, static_cast<int>(std::ceil(length / resolution)));  // 按格子取样，别漏掉中间的墙
+  const int steps = std::max(1, static_cast<int>(std::ceil(length / resolution)));  // 按格子取样
   for (int step = 0; step <= steps; ++step) {
     const double ratio = static_cast<double>(step) / static_cast<double>(steps);
     const double x = x0 + (x1 - x0) * ratio;
