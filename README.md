@@ -1,6 +1,6 @@
 # personal_nav2_robot
 
-ROS 2 Humble 下的差速小车仿真导航。仿真用 Gazebo Classic 11。默认场景是 `playground`，第二张图是 TurtleBot3 的房子。全局路径是自己写的栅格 A*，路径平滑是自己写的 QP，速度指令是自己写的 DWA。恢复行为、速度平滑和行为树仍用 Nav2 官方插件。
+ROS 2 Humble 下的差速小车仿真导航。仿真用 Gazebo Classic 11。默认场景是 `playground`，另一个场景是 TurtleBot3 的房子。全局路径是自己写的栅格 A*，路径平滑是自己写的 QP，速度指令是自己写的 DWA。恢复行为、速度平滑和行为树仍用 Nav2 官方插件。
 
 仿真里地图和场地已经对齐，不启动 AMCL。`map → odom` 是固定的单位变换，`odom → base_footprint` 用 Gazebo 真值位姿。
 
@@ -33,7 +33,7 @@ sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
 每个新终端都要先加载环境。改过 C++ 插件后要重新编译；只改了 yaml、launch、urdf 或 rviz，因为用了 `--symlink-install`，重新 launch 即可。
 
 ```bash
-cd /home/hzy/个人项目/personal_nav2_robot
+cd ~/personal_nav2_robot   # 换成自己 clone 的位置
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -51,7 +51,7 @@ ros2 launch my_nav2_robot full_navigation.launch.py
 
 `playground` 里有四个 0.5 m 的方块，位置大约是 `(2, 0)`、`(2, 2)`、`(-2, 2)`、`(-2, -2)`，以及 `y = 3` 附近的一堵墙。目标点要落在空白格子上。
 
-第二张图是 TurtleBot3 的房子，墙和走廊都比空场地多。地图由房子碰撞体栅格化得到，和 Gazebo 里的墙对齐。需要已安装 `ros-humble-turtlebot3-gazebo`。车生成在 `(-2.0, -0.8)`，不要再放回原点，那里贴着墙。
+`house` 是 TurtleBot3 的房子，墙和走廊都比空场地多。地图由房子碰撞体栅格化得到，和 Gazebo 里的墙对齐。需要已安装 `ros-humble-turtlebot3-gazebo`。车生成在 `(-2.0, -0.8)`，不要再放回原点，那里贴着墙。
 
 ```bash
 ros2 launch my_nav2_robot full_navigation.launch.py scene:=house
