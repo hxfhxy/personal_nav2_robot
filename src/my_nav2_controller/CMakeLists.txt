@@ -16,6 +16,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
 set(dependencies
   geometry_msgs
@@ -28,6 +29,7 @@ set(dependencies
   rclcpp_lifecycle
   tf2
   tf2_ros
+  tf2_geometry_msgs
 )
 
 add_library(${PROJECT_NAME}_lib SHARED

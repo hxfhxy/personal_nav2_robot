@@ -1,175 +1,144 @@
 # personal_nav2_robot
 
-ROS 2 Humble 下的差速小车仿真导航。仿真用 Gazebo Classic 11。默认场景是 `playground`，另一个场景是 TurtleBot3 的房子。全局路径是自己写的栅格 A*，路径平滑是自己写的 QP，速度指令是自己写的 DWA。恢复行为、速度平滑和行为树仍用 Nav2 官方插件。
+用于学习 Nav2 的差速小车仿真，环境是 Ubuntu 22.04、ROS 2 Humble、Gazebo Classic 11。
 
-仿真里地图和场地已经对齐，不启动 AMCL。`map → odom` 是固定的单位变换，`odom → base_footprint` 用 Gazebo 真值位姿。
+当前先打通 **三维雷达 → GICP 里程计 → AMCL 定位 → Nav2 → 底盘**，再逐项替换规划、平滑和控制算法。默认跑自己写的 A*、QP 和 DWA；官方 Navfn、SimpleSmoother、DWB 保留下来做对照，可以单独切回去。
 
-## 环境
+## 编译与启动
 
-- Ubuntu 22.04 / ROS 2 Humble
-- Gazebo Classic 11（`gazebo_ros`），不是 Jazzy 的 `gz-sim`
+```bash
+source /opt/ros/humble/setup.bash
+export ROS_LOCALHOST_ONLY=1
+cd /home/hzy/个人项目/personal_nav2_robot
+colcon build --symlink-install
+source install/setup.bash
+ros2 launch my_nav2_robot full_navigation.launch.py
+```
+
+依赖安装：
 
 ```bash
 sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
-  ros-humble-slam-toolbox ros-humble-gazebo-ros-pkgs
+  ros-humble-slam-toolbox ros-humble-gazebo-ros-pkgs \
+  ros-humble-turtlebot3-gazebo
 ```
 
-`my_nav2_frontend` 用的 `small_gicp` 由 CMake 的 `FetchContent` 从 GitHub 拉 `v1.0.0`，第一次 `colcon build` 要联网，之后走 `build/` 里的缓存。这个包模板代码多，第一次编译要几十秒。
+GICP 的 small_gicp v1.0.0 在第一次编译时由 CMake FetchContent 下载。前端默认采用 Release 优化构建，让配准跟上 10 Hz 雷达。改 C++ 后重新编译；通过 symlink 安装的 YAML、launch、URDF 和 RViz 配置修改后重新启动即可。
 
-## 目录
+同一时间只运行一套 Gazebo。启动后等地图、激光和 Nav2 就绪，在 RViz 顶部使用 **Nav2 Goal** 指定位置和朝向。需要修正定位初值时使用 **2D Pose Estimate**。默认初始位姿按场景出生点设置，只在初始化时使用，导航过程不使用真值纠正 GICP。
 
-| 包 | 内容 |
-| --- | --- |
-| `my_nav2_robot` | 车体 URDF、Gazebo 世界、地图、launch、Nav2 参数、行为树 |
-| `my_nav2_planner` | 全局规划插件 `my_nav2_planner/MyAStarPlanner` |
-| `my_nav2_controller` | 局部控制插件 `my_nav2_controller/MyDWAController` |
-| `my_nav2_smoother` | 路径平滑插件 `my_nav2_smoother/MyQpSmoother` |
-| `my_nav2_frontend` | 雷达前端 `gicp_frontend`：相邻帧 GICP，发布 `/lidar_odom` |
+仿真默认使用 local_only:=true，只接收本机 ROS 数据，避免局域网其他仿真的 /clock、/map、TF 和模型描述串入。新开终端发送目标或读取话题时也先执行 export ROS_LOCALHOST_ONLY=1。有意连接远程 ROS 节点时才使用 local_only:=false。同机运行其他 ROS 项目时，可在相关终端统一设置独立的 ROS_DOMAIN_ID。
 
-行为树里的插件名仍是 `GridBased` 和 `FollowPath`，对应关系写在 `config/nav2_params.yaml` 的 `plugin:` 上。
-
-## 如何启动和使用
-
-每个新终端都要先加载环境。改过 C++ 插件后要重新编译；只改了 yaml、launch、urdf 或 rviz，因为用了 `--symlink-install`，重新 launch 即可。
+无窗口且无 GPU / 显示服务时，改用 CPU 光线雷达：
 
 ```bash
-cd ~/personal_nav2_robot   # 换成自己 clone 的位置
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install
-source install/setup.bash
+ros2 launch my_nav2_robot full_navigation.launch.py gui:=false rviz:=false lidar_type:=ray
 ```
 
-### 导航
+命令行下发目标：
 
-同一时间只能有一个 `gzserver`。旧进程还占着端口时，新的 Gazebo 会马上退出，仿真和 RViz 里都不会出现车。先关掉上一轮的 Gazebo 和 RViz，再启动：
+```bash
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
+  "{pose: {header: {frame_id: map}, pose: {position: {x: 1.0, y: -1.0}, orientation: {w: 1.0}}}}"
+```
+
+## 当前链路
+
+- Gazebo 的同一颗雷达同时输出三维点云 /points 和中心线二维 /scan。/points 用于 GICP 和代价地图，/scan 用于 AMCL 或 slam_toolbox。
+- GICP 从 URDF 的静态 TF 读取雷达到底盘的外参，发布底盘 /odom 和 odom → base_footprint；包含平面位姿和底盘坐标系下的速度。/odom 的原点是第一帧的底盘位置。
+- AMCL 结合已有地图、/scan 和里程计，发布 map → odom。正常导航不发布固定的 map → odom。
+- 行为树依次调用全局规划、路径平滑和路径跟踪，并执行重规划、清图、旋转、等待、后退等恢复行为。
+- 控制器输出 /cmd_vel_nav，官方 velocity_smoother 输出 /cmd_vel，Gazebo 差速插件执行。
+
+导航使用的 TF 链是 map → odom → base_footprint → base_link → laser_link。map → odom 由 AMCL 提供；odom → base_footprint 由选定的里程计提供，两者职责不同。
+
+三维雷达为 16 线、水平 720 点、10 Hz、垂直 ±15°、量程 0.30–12 m。Gazebo 的 LaserScan 输出取中心垂直线；16 线均匀采样时中心线接近水平。车体约 0.40 × 0.30 × 0.15 m，轮半径 0.06 m。代价地图通过高度阈值排除地面点。车体中心在轮轴后方 0.08 m，车尾达到 x=-0.28 m；导航足迹向后覆盖到 -0.30 m，以清除车尾自身的雷达回波。
+
+## 一次替换一个模块
+
+行为树中的实例名始终是 GridBased、SmoothPath、FollowPath，启动参数只替换它们背后的插件类。
+
+不加参数时三个模块都是自写的：全局规划 `my_nav2_planner/MyAStarPlanner`、局部控制 `my_nav2_controller/MyDWAController`、路径平滑 `my_nav2_smoother/MyQpSmoother`。
 
 ```bash
 ros2 launch my_nav2_robot full_navigation.launch.py
 ```
 
-这次会打开 Gazebo 和 RViz。默认场景是 `playground`，车生成在场地中心 `(0, 0)`。Nav2 在 launch 约 5 秒后才起来，等 RViz 里地图、车体和激光都出现再发目标。RViz 的 Fixed Frame 是 `map`。俯视图里 +X 朝上，+Y 朝左。
+要拿官方插件做对照，单独换回一个：
 
-`playground` 里有四个 0.5 m 的方块，位置大约是 `(2, 0)`、`(2, 2)`、`(-2, 2)`、`(-2, -2)`，以及 `y = 3` 附近的一堵墙。目标点要落在空白格子上。
+```bash
+ros2 launch my_nav2_robot full_navigation.launch.py planner:=navfn
+ros2 launch my_nav2_robot full_navigation.launch.py smoother:=simple
+ros2 launch my_nav2_robot full_navigation.launch.py controller:=dwb
+```
 
-`house` 是 TurtleBot3 的房子，墙和走廊都比空场地多。地图由房子碰撞体栅格化得到，和 Gazebo 里的墙对齐。需要已安装 `ros-humble-turtlebot3-gazebo`。车生成在 `(-2.0, -0.8)`，不要再放回原点，那里贴着墙。
+三个可以任意组合：planner:=astar|navfn、smoother:=qp|simple、controller:=dwa|dwb。自写 DWA 每周期把 map 下的路径变换到局部代价地图的 odom 坐标系，再进行路径匹配。
+
+## 真值对照模式
+
+/ground_truth 始终保留用于评估，GICP 不从它读取运动初值或纠正估计。/wheel_odom 是差速插件的原始输出，也不直接驱动默认导航。
+
+需要复现已知地图和理想位姿下的导航时：
+
+```bash
+ros2 launch my_nav2_robot full_navigation.launch.py \
+  odom_source:=ground_truth localization:=ground_truth
+```
+
+这个模式由 ground_truth_tf.py 同时发布 /odom 和 odom → base_footprint，map → odom 为单位变换，AMCL 不启动。GICP 节点也不启动，避免同一 TF 有两个发布者。可以追加 planner、controller、smoother 参数作算法对照。
+
+odom_source:=ground_truth 单独使用时，仍通过 AMCL 定位；localization:=ground_truth 必须与真值里程计配对。
+
+## 场景和地图
+
+默认 playground 的地图按世界文件的方块和墙生成，分辨率 0.05 m，车出生在 (0, 0)。四个方块中心为 (2, 0)、(2, 2)、(-2, 2)、(-2, -2)，另有 y=3 附近的一堵墙。
+
+TurtleBot3 房子：
 
 ```bash
 ros2 launch my_nav2_robot full_navigation.launch.py scene:=house
 ```
 
-在 RViz 顶部工具栏选 **Nav2 Goal**，在地图上单击落点，按住拖出车头朝向后松开。行为树会调用 A* 规划，红线是全局路径 `/plan`，车在 Gazebo 里按 DWA 开过去。再点一个新目标会替换当前任务。停下当前任务用左侧 **Navigation 2** 面板里的 Cancel。
+house 出生点为 (-2.0, -0.8)，AMCL 初始位姿同步使用该值；GICP 的 odom 仍从局部零点起算。可以通过 world:=... 和 map:=... 覆盖资源。自定义地图的坐标原点若不同，使用 RViz 的 2D Pose Estimate 设置正确初始位置。
 
-也可以在另一个已经 `source` 过的终端发目标，例如开到 `(1, -1)`：
+地图、BT 和运行参数会复制到独立的 /tmp/my_nav2_robot_* 目录，避免 Humble 的参数重写处理中文路径时出错。
 
-```bash
-ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
-  "{pose: {header: {frame_id: map}, pose: {position: {x: 1.0, y: -1.0, z: 0.0}, orientation: {w: 1.0}}}}"
-```
-
-常用 launch 参数：
-
-| 参数 | 默认 | 作用 |
-| --- | --- | --- |
-| `scene` | `playground` | `playground` 四个方块，`house` TurtleBot3 房子 |
-| `gui` | `true` | 是否打开 Gazebo 窗口 |
-| `rviz` | `true` | 是否打开 RViz |
-| `use_sim_time` | `true` | 全栈使用仿真时钟 |
-| `world` | 空 | 非空时替换该场景的 Gazebo 世界 |
-| `map` | 空 | 非空时替换该场景的地图 YAML |
-| `params_file` | `config/nav2_params.yaml` | Nav2 参数 |
-| `slam` | `False` | `True` 时改为建图，见下一节 |
-
-工作区路径含中文时，launch 会把地图拷到 `/tmp/my_nav2_robot_map`，避免 Nav2 的 `RewrittenYaml` 把路径写坏。
-
-无界面跑导航：
-
-```bash
-ros2 launch my_nav2_robot full_navigation.launch.py gui:=false rviz:=false
-```
-
-### 只看车或只开仿真
-
-不加载地图和 Nav2，只在 RViz 里看模型：
-
-```bash
-ros2 launch my_nav2_robot display.launch.py
-```
-
-只开 Gazebo，并把模型 RViz 也打开：
-
-```bash
-ros2 launch my_nav2_robot gazebo_sim.launch.py use_rviz:=true
-```
-
-### 建图
-
-`slam:=True` 时启动 slam_toolbox，不发布固定的 `map → odom`，也不开 map_server。slam_toolbox 仍订阅二维 `/scan`，当前雷达只发 `/points`，这个模式扫不出地图。
+## 建图和单独仿真
 
 ```bash
 ros2 launch my_nav2_robot full_navigation.launch.py slam:=True
 ```
 
-## 话题
+建图时 map → odom 由 slam_toolbox 发布，不启动 AMCL 或静态 map_server；里程计仍由 GICP 提供。/scan 已由雷达输出。这里接通建图入口，建图质量和覆盖率还需要单独验证。
 
-| 话题 | 类型 | 谁发 | 说明 |
-| --- | --- | --- | --- |
-| `/points` | `sensor_msgs/PointCloud2` | Gazebo 雷达插件 | 16 线 × 720，10 Hz |
-| `/ground_truth` | `nav_msgs/Odometry` | `libgazebo_ros_p3d` | 世界系真值位姿，只用来对照 |
-| `/odom` | `nav_msgs/Odometry` | 差速轮插件 | 只有速度，不发 TF |
-| `/lidar_odom` | `nav_msgs/Odometry` | `gicp_frontend` | 帧间 GICP 累积出的位姿 |
-| `/cmd_vel` | `geometry_msgs/Twist` | Nav2 控制器 | 下给差速轮 |
-| `/plan` | `nav_msgs/Path` | 全局规划 | A* 出来再被 QP 平滑的路径 |
-| `/map` | `nav_msgs/OccupancyGrid` | `map_server` | 静态地图，不启 AMCL |
+保存地图：
 
-## 坐标系
-
-```
-map → odom → base_footprint → base_link → laser_link
+```bash
+ros2 run nav2_map_server map_saver_cli -f /tmp/my_nav2_map
 ```
 
-| 变换 | 谁在发 | 说明 |
-| --- | --- | --- |
-| `map → odom` | `static_transform_publisher` | 单位变换。导航模式下不启 AMCL |
-| `odom → base_footprint` | `ground_truth_tf.py` | 订阅 Gazebo `libgazebo_ros_p3d` 的 `/ground_truth`，原样发成 TF |
-| `/odom` | 差速轮插件 | 只提供速度，`publish_odom_tf` 为 false |
-| `base_footprint` 以下 | `robot_state_publisher` | 固定关节，雷达在 `laser_link` |
+退出建图后，用 map:=/tmp/my_nav2_map.yaml 启动定位导航，再根据保存地图的坐标系设置初始位姿。
 
-`lidar_odom → lidar_base` 是另一条独立的链，根节点是 `lidar_odom`，和上面这棵树不相连。GICP 前端只在自己这条链上累积位姿，不参与 `map → odom`；`lidar_base` 是虚拟的雷达坐标系，不对应 URDF 里的任何 link。
+只看模型：ros2 launch my_nav2_robot display.launch.py。
 
-轮式里程计会打滑。地图又钉在 `odom` 上时，打滑会把激光点拖离墙面，代价地图就在空白处留下障碍。仿真阶段因此改用真值位姿。
+只开仿真：ros2 launch my_nav2_robot gazebo_sim.launch.py use_rviz:=true。单独仿真默认使用真值里程计，也可追加 odom_source:=gicp。
 
-## 车和雷达
+## 包与实现
 
-差速两轮加后万向轮，车体约 0.40 m × 0.30 m × 0.15 m，轮半径 0.06 m。16 线三维雷达水平安装，水平 360°，垂直 ±15°，话题 `/points`，消息类型 `sensor_msgs/PointCloud2`，量程 0.30–12.0 m。
+- my_nav2_robot：URDF、Gazebo 世界、地图、launch、Nav2 参数、行为树、RViz。
+- my_nav2_frontend：先在底盘坐标系中过滤车身包围盒内的回波和低于 0.05 m 的地面点，再做 PCL VoxelGrid（0.15 m）和 small_gicp 相邻帧配准。这是平地仿真的预处理，相关参数为 min_registration_height、self_filter_min、self_filter_max。订阅队列只保留最新一帧，避免计算繁忙时积压旧位姿。/lidar_odom 保留雷达原始累积位姿用于调试；/odom 是经过外参补偿和平面投影的底盘里程计。失败帧不更新参考帧、不发布新的导航位姿，下一次配准仍相对于最后成功帧。
+- my_nav2_planner：八邻域 A*，octile 启发函数，禁止斜穿墙角；代价 ≥253 的已知格子不可走，未知区暂时允许通过。
+- my_nav2_smoother：以原路径点为变量，固定首尾，对参考偏差和二阶差分建立二次代价；x、y 分别用高斯消元求解，然后作为三次 B 样条控制点。曲线碰撞时回退，输出间距 0.1 m。
+- my_nav2_controller：基础 DWA。采样 (vx, wz)、预测 0.8 s 轨迹、撞到致命格的丢掉，剩下的按「离路径多远、离终点多远、朝向差多少、速度大小」四项加权打分，权重在 `FollowPath` 下面。位置进入 `goal_tolerance` 之后停止平移、只原地转到目标朝向，避免在终点附近来回蹭。碰撞检查仍只检查中心点，没有足迹检查和独立的安全距离项。
 
-底盘中心在轮轴后方 0.08 m，离地间隙 0.04 m。下沿波束会打到地面。代价地图只把高度 0.10 m 以上的点当成障碍。
+GICP 仍是帧间里程计，没有子地图、回环或 IMU 融合；全局漂移由 AMCL 校正。里程计中的固定协方差只是仿真初值，不是完整的不确定度估计。当前重点是先验证定位导航链路，然后再分别改进这些算法。
 
-## 现在用的模块
+## 验证
 
-| 模块 | 插件 |
-| --- | --- |
-| 全局规划 `GridBased` | `my_nav2_planner/MyAStarPlanner` |
-| 局部控制 `FollowPath` | `my_nav2_controller/MyDWAController` |
-| 路径平滑 `qp_smoother` | `my_nav2_smoother/MyQpSmoother` |
-| 雷达前端 | `my_nav2_frontend` 的 `gicp_frontend`，发布 `/lidar_odom` |
-| 恢复 | `Spin`、`BackUp`、`Wait` 等官方行为 |
-| 地图 | `map_server`，不启 AMCL |
-| 建图 | `slam_toolbox`，仅 `slam:=True` 时启动 |
+合成点云回归检查（不需要 Gazebo）：
 
-`nav2_params.yaml` 里还留着 AMCL 参数，launch 不会加载这个节点。
+```bash
+python3 src/my_nav2_frontend/test/test_gicp_odometry.py
+```
 
-## 自己写的算法
-
-A* 在全局代价地图上做八邻域搜索。代价大于等于 253（贴身膨胀和致命障碍）的格子不可走，未知格子先当可走。斜向移动时，两侧直线邻居有墙就剪掉，避免穿墙角。启发函数是 octile 距离，步代价里加了一点格子代价值，让路径少贴着膨胀走。输出是栅格中心连成的折线，中间点朝向还是单位四元数，终点朝向用目标朝向。
-
-平滑在 A* 和 DWA 之间。未知数就是折线上的路径点，x 和 y 各解一次。代价是两项二次项：路径点贴近原来的 A* 点，以及相邻三点的二阶差分 `x_{i-1} - 2 x_i + x_{i+1}`。起点和终点固定，所以这个 QP 变成线性方程组。解出的点再当作三次 B 样条的控制点，夹紧结点让曲线从起点收到终点。曲线扫进代价大于等于 253 的格子，就把控制点往原路径退；仍然进墙就退回 A* 折线。输出按 0.1 m 取样，并给每个点补上沿路径的朝向。
-
-DWA 按当前速度和加速度开动态窗口，采样 `(vx, wz)`，向前滚约 0.8 s。轨迹上任一点的代价到 253 就丢掉这条轨迹。碰撞只查车体中心。打分看终点离前方路径有多远、朝向差多少，再加一点线速度奖励，并稍微偏向更直的角速度。还没有离障碍远近和足迹碰撞。
-
-雷达前端订阅 `/points`。PCL 的 `VoxelGrid` 按 0.15 m 降采样，`small_gicp` 的 GICP 把当前帧对齐到上一帧，得到一个 `Eigen::Isometry3d`。这些增量乘起来发到 `/lidar_odom`，坐标系是 `lidar_odom → lidar_base`，不接到 `map`。终端里会拿同一段时间的 `/ground_truth` 位移做对照。
-
-代价地图两边都是静态层、激光障碍层和膨胀层。膨胀半径 0.55 m。激光标记距离 2.5 m，清除距离 3.0 m。A* 只把 253 及以上当成墙，膨胀层里大部分格子仍然可走。局部代价地图是 `odom` 下 4 m × 4 m 的滚动窗口。
-
-## 下一步
-
-QP 的未知数仍是路径点，B 样条只负责把这些点画成曲线，还没有曲率上限，障碍也还不是不等式约束。后面再慢慢收：给二次代价加上曲率或离障碍的距离，或者直接把未知数换成控制点。DWA 还没有离障碍远近和足迹碰撞。离开 Gazebo 真值时，再开 AMCL 发布 `map → odom`。
+这个检查向实际 GICP 节点输入已知运动的点云，检查外参补偿、平面位姿、速度、TF，以及配准失败后的恢复，不发布 /ground_truth。

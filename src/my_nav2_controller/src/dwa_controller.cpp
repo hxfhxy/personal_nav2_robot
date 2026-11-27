@@ -1,6 +1,7 @@
-// 局部控制：DWA。
-// 每个控制周期按当前速度开动态窗口，采样 (vx, wz)，各自向前滚一条 sim_time_ 长的轨迹；
-// 撞墙的直接丢掉，剩下的按「离前方路径多远 + 朝向差多少 + 速度大小」打分，取最高的一组。
+// 局部控制：基础 DWA。
+// 一个控制周期里：按当前速度开动态窗口 → 采样 (vx, wz) → 各自向前滚一条 sim_time_ 长的轨迹
+// → 撞到致命格的丢掉 → 剩下的打分：离路径多远、离终点多远、朝向差多少、速度大小。
+// 只有这四项，权重都在 yaml 的 FollowPath 下面。
 #include "my_nav2_controller/dwa_controller.hpp"
 
 #include <algorithm>
@@ -9,6 +10,8 @@
 
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "nav2_util/node_utils.hpp"
+#include "nav2_core/exceptions.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "tf2/utils.h"
 
@@ -44,6 +47,12 @@ void MyDWAController::configure(
   declare("vx_samples", 20);
   declare("vtheta_samples", 20);
   declare("lethal_cost", 253);
+  declare("goal_tolerance", 0.25);
+  declare("goal_yaw_tolerance", 0.10);
+  declare("path_weight", 1.0);
+  declare("goal_weight", 1.0);
+  declare("heading_weight", 0.5);
+  declare("velocity_weight", 0.2);
 
   node->get_parameter(name + ".max_vel_x", max_vel_x_);
   node->get_parameter(name + ".min_vel_x", min_vel_x_);
@@ -57,6 +66,12 @@ void MyDWAController::configure(
   int lethal_cost = 253;
   node->get_parameter(name + ".lethal_cost", lethal_cost);
   lethal_cost_ = static_cast<unsigned int>(std::max(0, std::min(lethal_cost, 254)));
+  node->get_parameter(name + ".goal_tolerance", goal_tolerance_);
+  node->get_parameter(name + ".goal_yaw_tolerance", goal_yaw_tolerance_);
+  node->get_parameter(name + ".path_weight", path_weight_);
+  node->get_parameter(name + ".goal_weight", goal_weight_);
+  node->get_parameter(name + ".heading_weight", heading_weight_);
+  node->get_parameter(name + ".velocity_weight", velocity_weight_);
   speed_limit_ = max_vel_x_;  // 没收到外部限速前，上沿就是最大线速度
 
   RCLCPP_INFO(logger_, "Configuring plugin %s of type MyDWAController", name_.c_str());
@@ -81,7 +96,6 @@ void MyDWAController::deactivate()
 void MyDWAController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;  // 整段换掉，控制器自己不改这条路径
-  plan_index_ = 0;      // 新路径从头对齐
 }
 
 void MyDWAController::setSpeedLimit(const double & speed_limit, const bool & percentage)
@@ -97,9 +111,9 @@ geometry_msgs::msg::TwistStamped MyDWAController::makeCmd(
   const geometry_msgs::msg::PoseStamped & pose) const
 {
   geometry_msgs::msg::TwistStamped cmd;
-  cmd.header.stamp = clock_->now();          // 仿真时钟
+  cmd.header.stamp = clock_->now();            // 仿真时钟
   cmd.header.frame_id = pose.header.frame_id;  // 跟当前位姿同一个坐标系
-  return cmd;                                // twist 还是 0
+  return cmd;                                  // twist 还是 0
 }
 
 double MyDWAController::getYaw(const geometry_msgs::msg::Pose & pose)
@@ -118,55 +132,23 @@ double MyDWAController::normAngle(double angle)
   return angle;
 }
 
-void MyDWAController::advancePlanIndex(double x, double y)
+// 整条路径逐段投影，取最近的一段。路径不长（几十个点），每周期全扫一遍没问题。
+MyDWAController::PathMatch MyDWAController::matchPath(double x, double y) const
 {
-  const auto & poses = global_plan_.poses;
-  const size_t n = poses.size();
-  if (n == 0) {
-    return;
+  PathMatch match;
+  match.distance = std::numeric_limits<double>::infinity();
+
+  const auto & poses = local_plan_.poses;
+  if (poses.empty()) {
+    return match;
   }
-  if (plan_index_ >= n) {
-    plan_index_ = n - 1;
+  if (poses.size() == 1) {
+    match.distance = std::hypot(poses[0].pose.position.x - x, poses[0].pose.position.y - y);
+    match.yaw = getYaw(poses[0].pose);
+    return match;
   }
 
-  // 只在前方一小段里找最近点。整条路径最近会把车吸回身后，或吸到旁边走廊
-  double best = std::hypot(
-    poses[plan_index_].pose.position.x - x,
-    poses[plan_index_].pose.position.y - y);
-  size_t best_i = plan_index_;
-  double walked = 0.0;
-  for (size_t i = plan_index_ + 1; i < n && walked < 1.5; ++i) {
-    const auto & prev = poses[i - 1].pose.position;
-    const auto & cur = poses[i].pose.position;
-    walked += std::hypot(cur.x - prev.x, cur.y - prev.y);
-    const double d = std::hypot(cur.x - x, cur.y - y);
-    if (d < best) {
-      best = d;
-      best_i = i;
-    }
-  }
-  plan_index_ = best_i;
-}
-
-void MyDWAController::matchAhead(double x, double y, double & dist, double & yaw) const
-{
-  const auto & poses = global_plan_.poses;
-  const size_t n = poses.size();
-  dist = std::numeric_limits<double>::infinity();
-  yaw = 0.0;
-  if (n == 0) {
-    return;
-  }
-
-  const size_t i0 = std::min(plan_index_, n - 1);
-  if (i0 + 1 >= n) {
-    dist = std::hypot(poses.back().pose.position.x - x, poses.back().pose.position.y - y);
-    yaw = getYaw(poses.back().pose);  // 只剩终点，用目标朝向
-    return;
-  }
-
-  double walked = 0.0;
-  for (size_t i = i0; i + 1 < n && walked < 1.5; ++i) {
+  for (size_t i = 0; i + 1 < poses.size(); ++i) {
     const double ax = poses[i].pose.position.x;
     const double ay = poses[i].pose.position.y;
     const double bx = poses[i + 1].pose.position.x;
@@ -174,25 +156,26 @@ void MyDWAController::matchAhead(double x, double y, double & dist, double & yaw
     const double dx = bx - ax;
     const double dy = by - ay;
     const double len2 = dx * dx + dy * dy;
-    walked += std::sqrt(len2);
 
     double t = 0.0;
     if (len2 > 1e-8) {
       t = std::clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0.0, 1.0);  // 垂足落在线段上
     }
-    const double d = std::hypot(x - (ax + t * dx), y - (ay + t * dy));
-    if (d >= dist) {
+    const double distance = std::hypot(x - (ax + t * dx), y - (ay + t * dy));
+    if (distance >= match.distance) {
       continue;
     }
-    dist = d;
-    if (i + 1 == n - 1 && t > 0.5) {
-      yaw = getYaw(poses.back().pose);  // 贴到终点这一段，用目标朝向
+
+    match.distance = distance;
+    if (i + 2 == poses.size() && t > 0.5) {
+      match.yaw = getYaw(poses.back().pose);  // 已经贴到最后一段的前半，按目标朝向要求车头
     } else if (len2 > 1e-8) {
-      yaw = std::atan2(dy, dx);  // 这段路径往哪指
+      match.yaw = std::atan2(dy, dx);  // 这段路径往哪指
     } else {
-      yaw = getYaw(poses[i].pose);
+      match.yaw = getYaw(poses[i].pose);  // 重合点
     }
   }
+  return match;
 }
 
 // 返回 true = 这个点不能走。
@@ -242,8 +225,28 @@ geometry_msgs::msg::TwistStamped MyDWAController::computeVelocityCommands(
     return cmd;  // 没有路径，停车
   }
 
+  // AMCL 的 map -> odom 会变化，每周期重新变换整条路径，不能直接比较 map 和 odom 数值。
+  local_plan_ = global_plan_;
+  const auto target_frame = costmap_ros_->getGlobalFrameID();
+  if (pose.header.frame_id != target_frame) {
+    throw nav2_core::PlannerException("DWA robot pose is not in the local costmap frame");
+  }
+  if (global_plan_.header.frame_id != target_frame) {
+    try {
+      const auto transform = tf_->lookupTransform(
+        target_frame, global_plan_.header.frame_id, tf2::TimePointZero);
+      for (auto & point : local_plan_.poses) {
+        geometry_msgs::msg::PoseStamped transformed;
+        tf2::doTransform(point, transformed, transform);
+        point = transformed;
+      }
+      local_plan_.header.frame_id = target_frame;
+    } catch (const tf2::TransformException & ex) {
+      throw nav2_core::PlannerException(std::string("DWA path transform failed: ") + ex.what());
+    }
+  }
   // 到点判断交给 goal_checker，这里不再自己算距离
-  const auto & goal_pose = global_plan_.poses.back().pose;
+  const auto & goal_pose = local_plan_.poses.back().pose;
   if (goal_checker != nullptr &&
     goal_checker->isGoalReached(pose.pose, goal_pose, velocity))
   {
@@ -264,7 +267,25 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   start.x = pose.pose.position.x;
   start.y = pose.pose.position.y;
   start.yaw = getYaw(pose.pose);
-  advancePlanIndex(start.x, start.y);  // 这一拍先对齐到前方路径，采样都用这个下标
+
+  // 位置已经进到点容差：只原地转到目标朝向，不再平移。
+  // 收尾不参与打分。靠权重去权衡的话，车会在容差边界上慢慢逼近却永远差一点，
+  // 表现出来就是在终点附近来回蹭或者转不停。
+  const auto & goal_pose = local_plan_.poses.back().pose;
+  const double goal_distance =
+    std::hypot(goal_pose.position.x - start.x, goal_pose.position.y - start.y);
+  if (goal_distance <= goal_tolerance_) {
+    const double yaw_error = normAngle(getYaw(goal_pose) - start.yaw);
+    if (std::abs(yaw_error) <= goal_yaw_tolerance_) {
+      return best;  // 位置和朝向都够了，交给 goal_checker 收尾
+    }
+    const double wz_hi = std::min(max_vel_theta_, velocity.angular.z + acc_lim_theta_ * 0.2);
+    const double wz_lo = std::max(-max_vel_theta_, velocity.angular.z - acc_lim_theta_ * 0.2);
+    best.angular.z = std::clamp(2.0 * yaw_error, wz_lo, wz_hi);  // 仍在动态窗口内加速
+    RCLCPP_INFO_THROTTLE(
+      logger_, *clock_, 1000, "At goal, turning %.2f rad in place", yaw_error);
+    return best;
+  }
 
   // 动态窗口：当前速度 ± 加速度*dt，再卡在最大速度里
   const double dt = 0.2;  // 只用来收窗口，不是控制周期
@@ -280,13 +301,14 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
     return best;  // 窗口是空的
   }
 
-  // vx、wz 各自均匀取样，两层循环就是全部候选
+  const auto & goal = local_plan_.poses.back().pose.position;
   const int nvx = std::max(1, vx_samples_);
   const int nwz = std::max(1, vtheta_samples_);
-  double best_score = -std::numeric_limits<double>::infinity();
-  bool found = false;
   const double vx_step = (nvx > 1) ? (vx_hi - vx_lo) / static_cast<double>(nvx - 1) : 0.0;  // 相邻采样间隔
   const double wz_step = (nwz > 1) ? (wz_hi - wz_lo) / static_cast<double>(nwz - 1) : 0.0;
+
+  double best_score = -std::numeric_limits<double>::infinity();
+  bool found = false;
 
   for (int i = 0; i < nvx; ++i) {
     const double vx = vx_lo + vx_step * static_cast<double>(i);
@@ -301,17 +323,20 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
           break;
         }
       }
-      if (hit) continue;
+      if (hit) {
+        continue;
+      }
 
-      // 终点到前方路径的横向距离。不再和整条路径的顶点比，否则会左右来回追
+      // 只对轨迹末端打分：离路径多远、离终点多远、朝向差多少、以及速度大小
       const auto & end = traj.back();
-      double path_err = 0.0;
-      double path_yaw = 0.0;
-      matchAhead(end.x, end.y, path_err, path_yaw);
-      const double heading_err = std::abs(normAngle(end.yaw - path_yaw));  // 终点朝向和路径差多少
-      // 朝向用平方：小偏差还能修正，大角度跨过路径就亏。0.05*|wz| 让差不多的轨迹挑更直的
+      const auto match = matchPath(end.x, end.y);
+      const double goal_distance = std::hypot(goal.x - end.x, goal.y - end.y);
+      const double heading_error = std::abs(normAngle(end.yaw - match.yaw));
       const double score =
-        -path_err - 0.5 * heading_err * heading_err - 0.05 * std::abs(wz) + 0.8 * vx;
+        -path_weight_ * match.distance -
+        goal_weight_ * goal_distance -
+        heading_weight_ * heading_error * heading_error +
+        velocity_weight_ * vx;
 
       if (!found || score > best_score) {
         best_score = score;

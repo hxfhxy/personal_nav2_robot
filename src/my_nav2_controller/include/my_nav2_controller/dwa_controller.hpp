@@ -1,5 +1,6 @@
 // MyDWAController：Nav2 局部控制插件（对应 yaml 里的 FollowPath）。
-// 声明 FollowPath 会调用的接口，以及动态窗口采样、轨迹前推、打分这几个内部函数。
+// 基础 DWA：动态窗口采样 (vx, wz)，预测 sim_time_ 长的轨迹，撞墙的丢掉，
+// 剩下的按「离路径多远、离终点多远、朝向差多少、速度大小」四项打分。
 
 #ifndef MY_NAV2_CONTROLLER__DWA_CONTROLLER_HPP_
 #define MY_NAV2_CONTROLLER__DWA_CONTROLLER_HPP_
@@ -29,7 +30,6 @@ struct Pose2D
   double yaw{0.0};
 };
 
-// Nav2 局部控制插件：在动态窗口里采样速度，滚轨迹打分，选出这一拍的 cmd_vel。
 class MyDWAController : public nav2_core::Controller
 {
 public:
@@ -54,15 +54,21 @@ public:
     nav2_core::GoalChecker * goal_checker) override;
 
 protected:
+  // 路径上离给定点最近的位置：横向距离，以及那里的路径朝向。
+  struct PathMatch
+  {
+    double distance{0.0};
+    double yaw{0.0};
+  };
+
   geometry_msgs::msg::TwistStamped makeCmd(const geometry_msgs::msg::PoseStamped & pose) const;  // 零速度壳子
   static double getYaw(const geometry_msgs::msg::Pose & pose);  // 四元数转航向角
+  static double normAngle(double angle);  // 收到 (-pi, pi]
+
+  // 整条路径上找最近点，逐段投影。点落在最后一段靠近终点的一侧时，朝向按目标朝向算。
+  PathMatch matchPath(double x, double y) const;
   // 点是否不可走：越界、代价 >= lethal_cost_ 都算撞上。未知格子暂当可走。
   bool inCollision(double wx, double wy) const;
-  static double normAngle(double angle);  // 收到 (-pi, pi]
-  // 车走到哪了。只在 plan_index_ 往前约 1.5 m 里找，避免吸到身后或另一条走廊
-  void advancePlanIndex(double x, double y);
-  // 点到前方折线的距离，以及这段路径的朝向
-  void matchAhead(double x, double y, double & dist, double & yaw) const;
   // vx、wz 不变，向前滚 sim_time_ 秒，返回轨迹点。
   std::vector<Pose2D> projectTrajectory(
     const Pose2D & start, double vx, double wz) const;
@@ -78,7 +84,7 @@ protected:
   nav2_costmap_2d::Costmap2D * costmap_{nullptr};  // 局部代价地图（栅格）
   std::string name_;                               // 插件实例名，对应 yaml 里 FollowPath
   nav_msgs::msg::Path global_plan_;                // 当前要跟的全局路径
-  size_t plan_index_{0};                           // 车上一次对齐到的路径点，只往前走
+  nav_msgs::msg::Path local_plan_;                 // 每周期转换到局部 costmap 坐标系
   rclcpp::Logger logger_{rclcpp::get_logger("MyDWAController")};
   rclcpp::Clock::SharedPtr clock_;
 
@@ -87,12 +93,22 @@ protected:
   double max_vel_theta_{1.0};      // 角速度上限，rad/s
   double acc_lim_x_{2.5};          // 线加速度，收动态窗口用
   double acc_lim_theta_{3.2};      // 角加速度
-  double sim_time_{0.8};           // 每条轨迹向前看多久。太长时终点离开弯道，高速候选被丢掉
+  double sim_time_{0.8};           // 每条轨迹向前看多久
   double sim_granularity_{0.05};   // 轨迹点的时间间隔，秒
   int vx_samples_{20};             // 线速度采样数
   int vtheta_samples_{20};         // 角速度采样数
   unsigned int lethal_cost_{253};  // >=253 当墙
   double speed_limit_{0.5};        // 外部限速，和 max_vel_x_ 一起卡上沿
+  // 收尾用。goal_tolerance_ 要和 goal_checker 的 xy_goal_tolerance 一致：
+  // 进到这个半径只原地转到 goal_yaw_tolerance_ 以内，平移交给 goal_checker 判完成。
+  double goal_tolerance_{0.25};
+  double goal_yaw_tolerance_{0.10};
+
+  // 四项权重，都在 yaml 的 FollowPath 下面
+  double path_weight_{1.0};        // 轨迹末端离路径多远，米
+  double goal_weight_{1.0};        // 轨迹末端离终点多远，米
+  double heading_weight_{0.5};     // 轨迹末端朝向和路径朝向差多少，弧度
+  double velocity_weight_{0.2};    // 跑得多快。只用来在差不多的轨迹里挑顺的，不宜大
 };
 
 }  // namespace my_nav2_controller
