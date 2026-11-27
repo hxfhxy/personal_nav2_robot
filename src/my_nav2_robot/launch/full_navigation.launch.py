@@ -1,4 +1,7 @@
-"""GICP odometry + AMCL localization. Planner/controller/smoother default to my own plugins."""
+"""GICP odometry + AMCL localization in the TurtleBot3 house.
+
+Planner/controller/smoother default to my own plugins and can be swapped at launch.
+"""
 import os
 import shutil
 import tempfile
@@ -29,17 +32,13 @@ def _cache_map(map_yaml, cache_dir):
 
 
 def _scene_paths(context, pkg_share):
-    scene = LaunchConfiguration('scene').perform(context)
-    if scene == 'house':
-        world = os.path.join(get_package_share_directory('turtlebot3_gazebo'),
-                             'worlds', 'turtlebot3_house.world')
-        x_pose, y_pose = '-2.0', '-0.8'
-    else:
-        world = os.path.join(pkg_share, 'worlds', 'playground.sdf')
-        x_pose, y_pose = '0.0', '0.0'
+    """Only the house scene is kept; world and map can still be overridden."""
+    world = os.path.join(get_package_share_directory('turtlebot3_gazebo'),
+                         'worlds', 'turtlebot3_house.world')
+    x_pose, y_pose = '-2.0', '-0.8'  # 原点贴着墙，必须从这个位置生成
     world = LaunchConfiguration('world').perform(context).strip() or world
     map_yaml = LaunchConfiguration('map').perform(context).strip() or os.path.join(
-        pkg_share, 'maps', scene + '.yaml')
+        pkg_share, 'maps', 'house.yaml')
     return world, map_yaml, x_pose, y_pose
 
 
@@ -154,7 +153,6 @@ def _launch_setup(context):
 def generate_launch_description():
     pkg_share = get_package_share_directory('my_nav2_robot')
     return LaunchDescription([
-        DeclareLaunchArgument('scene', default_value='playground', choices=['playground', 'house']),
         DeclareLaunchArgument('slam', default_value='False', choices=['True', 'False', 'true', 'false']),
         DeclareLaunchArgument('world', default_value=''),
         DeclareLaunchArgument('map', default_value=''),

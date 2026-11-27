@@ -96,7 +96,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'world',
-            default_value=os.path.join(pkg_share, 'worlds', 'playground.sdf'),
+            default_value=os.path.join(
+                get_package_share_directory('turtlebot3_gazebo'),
+                'worlds', 'turtlebot3_house.world'),
             description='Gazebo Classic world SDF'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
@@ -104,8 +106,8 @@ def generate_launch_description():
         DeclareLaunchArgument('local_only', default_value='true', choices=['true', 'false']),
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', PythonExpression([
             "'1' if '", LaunchConfiguration('local_only'), "' == 'true' else '0'"])),
-        DeclareLaunchArgument('x_pose', default_value='0.0'),
-        DeclareLaunchArgument('y_pose', default_value='0.0'),
+        DeclareLaunchArgument('x_pose', default_value='-2.0'),
+        DeclareLaunchArgument('y_pose', default_value='-0.8'),
         DeclareLaunchArgument('z_pose', default_value='0.01'),
         DeclareLaunchArgument('odom_source', default_value='ground_truth',
                               choices=['gicp', 'ground_truth']),

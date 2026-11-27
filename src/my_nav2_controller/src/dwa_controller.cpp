@@ -28,6 +28,18 @@ void MyDWAController::configure(
   tf_ = tf;
   costmap_ros_ = costmap_ros;
   costmap_ = costmap_ros->getCostmap();  // 真正的二维栅格，碰撞检查用这块
+  // 车体轮廓多边形顶点，按 8 cm 在边上插点：只查四个角的话，细桌腿可能从两个角之间穿过去
+  const auto vertices = costmap_ros->getRobotFootprint();
+  for (size_t i = 0; i < vertices.size(); ++i) {
+    const auto & a = vertices[i];
+    const auto & b = vertices[(i + 1) % vertices.size()];
+    const double edge = std::hypot(b.x - a.x, b.y - a.y);
+    const int steps = std::max(1, static_cast<int>(std::ceil(edge / 0.05)));
+    for (int k = 0; k < steps; ++k) {
+      const double t = static_cast<double>(k) / static_cast<double>(steps);
+      footprint_.emplace_back(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    }
+  }
 
   auto node = parent.lock();
   logger_ = node->get_logger();
@@ -49,6 +61,8 @@ void MyDWAController::configure(
   declare("lethal_cost", 253);
   declare("goal_tolerance", 0.25);
   declare("goal_yaw_tolerance", 0.10);
+  declare("escape_reverse_speed", 0.25);
+  declare("check_footprint", true);
   declare("path_weight", 1.0);
   declare("goal_weight", 1.0);
   declare("heading_weight", 0.5);
@@ -68,6 +82,8 @@ void MyDWAController::configure(
   lethal_cost_ = static_cast<unsigned int>(std::max(0, std::min(lethal_cost, 254)));
   node->get_parameter(name + ".goal_tolerance", goal_tolerance_);
   node->get_parameter(name + ".goal_yaw_tolerance", goal_yaw_tolerance_);
+  node->get_parameter(name + ".escape_reverse_speed", escape_reverse_speed_);
+  node->get_parameter(name + ".check_footprint", check_footprint_);
   node->get_parameter(name + ".path_weight", path_weight_);
   node->get_parameter(name + ".goal_weight", goal_weight_);
   node->get_parameter(name + ".heading_weight", heading_weight_);
@@ -174,18 +190,46 @@ MyDWAController::PathMatch MyDWAController::matchPath(double x, double y) const
     } else {
       match.yaw = getYaw(poses[i].pose);  // 重合点
     }
+    if (plan_s_.size() == poses.size()) {
+      // 沿路径到终点的剩余长度，绕弯时它会一直减小，而直线距离会先变大
+      const double segment = plan_s_[i + 1] - plan_s_[i];
+      match.remaining = plan_s_.back() - (plan_s_[i] + t * segment);
+    }
   }
   return match;
+}
+
+// 直接读代价；地图外面当成致命，未知格子返回 NO_INFORMATION 由调用处决定。
+unsigned char MyDWAController::costAt(double wx, double wy) const
+{
+  unsigned int mx = 0, my = 0;
+  if (!costmap_ || !costmap_->worldToMap(wx, wy, mx, my)) {
+    return nav2_costmap_2d::LETHAL_OBSTACLE;
+  }
+  return costmap_->getCost(mx, my);
+}
+
+// 车体轮廓是否撞上：footprint_ 是 base_footprint 下的点，按 yaw 旋转后再查代价。
+// 轮廓点只看 254（真实障碍格）。253 是"离障碍小于内切半径"的膨胀带，
+// 轮廓点落进去只说明离得近，不代表压上了；用 253 判会把窄路整条封死。
+bool MyDWAController::footprintCollides(double x, double y, double yaw) const
+{
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  for (const auto & point : footprint_) {
+    if (costAt(x + c * point.first - s * point.second,
+               y + s * point.first + c * point.second) >= nav2_costmap_2d::LETHAL_OBSTACLE)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 // 返回 true = 这个点不能走。
 bool MyDWAController::inCollision(double wx, double wy) const
 {
-  unsigned int mx = 0, my = 0;
-  if (!costmap_->worldToMap(wx, wy, mx, my)) {
-    return true;  // 局部地图外面
-  }
-  const unsigned char cost = costmap_->getCost(mx, my);
+  const unsigned char cost = costAt(wx, wy);
   if (cost == nav2_costmap_2d::NO_INFORMATION) {
     return false;  // 未知区先当可走，否则没扫到的地方车会停住
   }
@@ -257,6 +301,44 @@ geometry_msgs::msg::TwistStamped MyDWAController::computeVelocityCommands(
   return cmd;
 }
 
+// 脱困模式：不做碰撞出局判断，允许小幅倒车，只看轨迹末端代价能不能降下来。
+// 正常采样全灭时也会走这里，避免直接零速死锁在拐角或桌子下面。
+geometry_msgs::msg::Twist MyDWAController::escapeTwist(
+  const Pose2D & start, const geometry_msgs::msg::Twist & velocity)
+{
+  geometry_msgs::msg::Twist best;
+  const double dt = 0.2;
+  const double vx_hi = std::min({max_vel_x_, speed_limit_,
+                               velocity.linear.x + acc_lim_x_ * dt});
+  const double vx_lo = std::min(vx_hi, -escape_reverse_speed_);
+  const double wz_hi = std::min(max_vel_theta_, velocity.angular.z + acc_lim_theta_ * dt);
+  const double wz_lo = std::max(-max_vel_theta_, velocity.angular.z - acc_lim_theta_ * dt);
+  const int nvx = std::max(1, vx_samples_);
+  const int nwz = std::max(1, vtheta_samples_);
+  const double vx_step = (nvx > 1) ? (vx_hi - vx_lo) / static_cast<double>(nvx - 1) : 0.0;
+  const double wz_step = (nwz > 1) ? (wz_hi - wz_lo) / static_cast<double>(nwz - 1) : 0.0;
+
+  double best_score = -std::numeric_limits<double>::infinity();
+  bool found = false;
+  for (int i = 0; i < nvx; ++i) {
+    const double vx = vx_lo + vx_step * static_cast<double>(i);
+    for (int j = 0; j < nwz; ++j) {
+      const double wz = wz_lo + wz_step * static_cast<double>(j);
+      const auto traj = projectTrajectory(start, vx, wz);
+      const auto & end = traj.back();
+      // 主要看末端代价能不能降；代价一样时偏向倒车，贴着障碍更容易脱开
+      const double score = -static_cast<double>(costAt(end.x, end.y)) - 0.01 * vx;
+      if (!found || score > best_score) {
+        best_score = score;
+        found = true;
+        best.linear.x = vx;
+        best.angular.z = wz;
+      }
+    }
+  }
+  return best;  // 一条都没有就零速，交给行为树的恢复行为
+}
+
 geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   const geometry_msgs::msg::PoseStamped & pose,
   const geometry_msgs::msg::Twist & velocity)
@@ -267,6 +349,15 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   start.x = pose.pose.position.x;
   start.y = pose.pose.position.y;
   start.yaw = getYaw(pose.pose);
+
+  // 车心已经在致命格：所有轨迹的第 0 步（当前位置）都会被判撞，正常采样必然全灭。
+  const unsigned char start_cost = costAt(start.x, start.y);
+  if (start_cost >= lethal_cost_) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 2000,
+      "Robot center is in lethal cost (%u), escaping", start_cost);
+    return escapeTwist(start, velocity);
+  }
 
   // 位置已经进到点容差：只原地转到目标朝向，不再平移。
   // 收尾不参与打分。靠权重去权衡的话，车会在容差边界上慢慢逼近却永远差一点，
@@ -285,6 +376,15 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000, "At goal, turning %.2f rad in place", yaw_error);
     return best;
+  }
+
+  // 沿路径的累计弧长。打分用"剩余路径长度"而不是到终点的直线距离：
+  // 房子里的路径要绕墙，拐角处直着走反而离终点更远，用直线距离会让车停在拐角不动。
+  plan_s_.assign(local_plan_.poses.size(), 0.0);
+  for (size_t idx = 1; idx < local_plan_.poses.size(); ++idx) {
+    const auto & a = local_plan_.poses[idx - 1].pose.position;
+    const auto & b = local_plan_.poses[idx].pose.position;
+    plan_s_[idx] = plan_s_[idx - 1] + std::hypot(b.x - a.x, b.y - a.y);
   }
 
   // 动态窗口：当前速度 ± 加速度*dt，再卡在最大速度里
@@ -309,6 +409,10 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
 
   double best_score = -std::numeric_limits<double>::infinity();
   bool found = false;
+  int valid_count = 0;
+  double best_path = 0.0;
+  double best_goal = 0.0;
+  double best_head = 0.0;
 
   for (int i = 0; i < nvx; ++i) {
     const double vx = vx_lo + vx_step * static_cast<double>(i);
@@ -317,8 +421,15 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
 
       const auto traj = projectTrajectory(start, vx, wz);
       bool hit = false;
-      for (const auto & p : traj) {
-        if (inCollision(p.x, p.y)) {
+      // 从第 1 个点开始查：第 0 点就是当前位置，把它算进去的话，
+      // 车一旦贴到膨胀边缘，所有候选都会在第 0 步出局，车就再也动不了。
+      // 中心点每步都查，车体轮廓隔一步查一次（轨迹点间隔 2.5 cm，够密了）。
+      for (size_t k = 1; k < traj.size(); ++k) {
+        bool blocked = inCollision(traj[k].x, traj[k].y);
+        if (!blocked && check_footprint_ && footprint_.size() >= 3 && k % 2 == 0) {
+          blocked = footprintCollides(traj[k].x, traj[k].y, traj[k].yaw);
+        }
+        if (blocked) {
           hit = true;  // 任意一个点撞上，整条丢掉
           break;
         }
@@ -326,21 +437,24 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
       if (hit) {
         continue;
       }
+      ++valid_count;
 
-      // 只对轨迹末端打分：离路径多远、离终点多远、朝向差多少、以及速度大小
+      // 只对轨迹末端打分：离路径多远、沿路径还剩多长、朝向差多少、以及速度大小
       const auto & end = traj.back();
       const auto match = matchPath(end.x, end.y);
-      const double goal_distance = std::hypot(goal.x - end.x, goal.y - end.y);
       const double heading_error = std::abs(normAngle(end.yaw - match.yaw));
       const double score =
         -path_weight_ * match.distance -
-        goal_weight_ * goal_distance -
+        goal_weight_ * match.remaining -
         heading_weight_ * heading_error * heading_error +
         velocity_weight_ * vx;
 
       if (!found || score > best_score) {
         best_score = score;
         found = true;
+        best_path = match.distance;
+        best_goal = match.remaining;
+        best_head = heading_error;
         best.linear.x = vx;   // 留下这一对速度
         best.angular.z = wz;
       }
@@ -348,9 +462,17 @@ geometry_msgs::msg::Twist MyDWAController::computeBestTwist(
   }
 
   if (!found) {
-    RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000, "DWA found no valid trajectory");
-    // best 还是 0
+    RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000,
+      "DWA found no valid trajectory, dropping collision checks to escape");
+    return escapeTwist(start, velocity);
   }
+  RCLCPP_INFO_THROTTLE(
+    logger_, *clock_, 2000,
+    "DWA pose=(%.2f,%.2f) goal=(%.2f,%.2f) vx=%.2f wz=%.2f "
+    "path=%.2f remain=%.2f head=%.2f valid=%d",
+    start.x, start.y, goal.x, goal.y,
+    best.linear.x, best.angular.z,
+    best_path, best_goal, best_head, valid_count);
   return best;
 }
 

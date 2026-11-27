@@ -11,7 +11,6 @@ install(PROGRAMS
 install(DIRECTORY
   launch
   urdf
-  worlds
   maps
   config
   rviz

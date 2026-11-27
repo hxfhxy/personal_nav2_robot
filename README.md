@@ -91,15 +91,13 @@ odom_source:=ground_truth 单独使用时，仍通过 AMCL 定位；localization
 
 ## 场景和地图
 
-默认 playground 的地图按世界文件的方块和墙生成，分辨率 0.05 m，车出生在 (0, 0)。四个方块中心为 (2, 0)、(2, 2)、(-2, 2)、(-2, -2)，另有 y=3 附近的一堵墙。
-
-TurtleBot3 房子：
+只保留 TurtleBot3 房子一个场景（依赖 `ros-humble-turtlebot3-gazebo`）。车出生在 (-2.0, -0.8)，原点贴着墙，不要放回 (0, 0)；AMCL 初始位姿同步使用该值，GICP 的 odom 仍从局部零点起算。
 
 ```bash
-ros2 launch my_nav2_robot full_navigation.launch.py scene:=house
+ros2 launch my_nav2_robot full_navigation.launch.py
 ```
 
-house 出生点为 (-2.0, -0.8)，AMCL 初始位姿同步使用该值；GICP 的 odom 仍从局部零点起算。可以通过 world:=... 和 map:=... 覆盖资源。自定义地图的坐标原点若不同，使用 RViz 的 2D Pose Estimate 设置正确初始位置。
+可以通过 world:=... 和 map:=... 覆盖资源。自定义地图的坐标原点若不同，使用 RViz 的 2D Pose Estimate 设置正确初始位置。
 
 地图、BT 和运行参数会复制到独立的 /tmp/my_nav2_robot_* 目录，避免 Humble 的参数重写处理中文路径时出错。
 
@@ -129,7 +127,7 @@ ros2 run nav2_map_server map_saver_cli -f /tmp/my_nav2_map
 - my_nav2_frontend：先在底盘坐标系中过滤车身包围盒内的回波和低于 0.05 m 的地面点，再做 PCL VoxelGrid（0.15 m）和 small_gicp 相邻帧配准。这是平地仿真的预处理，相关参数为 min_registration_height、self_filter_min、self_filter_max。订阅队列只保留最新一帧，避免计算繁忙时积压旧位姿。/lidar_odom 保留雷达原始累积位姿用于调试；/odom 是经过外参补偿和平面投影的底盘里程计。失败帧不更新参考帧、不发布新的导航位姿，下一次配准仍相对于最后成功帧。
 - my_nav2_planner：八邻域 A*，octile 启发函数，禁止斜穿墙角；代价 ≥253 的已知格子不可走，未知区暂时允许通过。
 - my_nav2_smoother：以原路径点为变量，固定首尾，对参考偏差和二阶差分建立二次代价；x、y 分别用高斯消元求解，然后作为三次 B 样条控制点。曲线碰撞时回退，输出间距 0.1 m。
-- my_nav2_controller：基础 DWA。采样 (vx, wz)、预测 0.8 s 轨迹、撞到致命格的丢掉，剩下的按「离路径多远、离终点多远、朝向差多少、速度大小」四项加权打分，权重在 `FollowPath` 下面。位置进入 `goal_tolerance` 之后停止平移、只原地转到目标朝向，避免在终点附近来回蹭。碰撞检查仍只检查中心点，没有足迹检查和独立的安全距离项。
+- my_nav2_controller：基础 DWA。采样 (vx, wz)、预测 0.8 s 轨迹、撞到致命格的丢掉，剩下的按「离路径多远、沿路径剩余长度、朝向差多少、速度大小」四项加权打分，权重在 `FollowPath` 下面。剩余长度按路径弧长算，不用到终点的直线距离——房子里的路径要绕墙，拐角处直着走反而离终点更远，用直线距离会让车停在拐角。位置进入 `goal_tolerance` 之后停止平移、只原地转到目标朝向，避免在终点附近来回蹭。碰撞检查从轨迹第 1 个点开始（第 0 点是当前位置，算进去会死锁）；车心已在致命格或所有候选都被判撞时进入脱困模式，允许以 `escape_reverse_speed` 倒车并按末端代价下降选方向。碰撞检查中心点用 253、车体轮廓用 254：253 是膨胀带，轮廓点落进去只说明离得近；254 才是真压到障碍。轮廓按 5 cm 在边上插点，避免细桌腿从两个角之间漏过去，`check_footprint: false` 可退回只查中心。代价地图的 `min_obstacle_height` 取 0.25 m（高于车壳顶 0.19 m，滤掉自车回波，桌腿和墙仍在），`obstacle_min_range` 取 0.10 m（否则贴到 0.3 m 内的桌腿会被丢掉）。
 
 GICP 仍是帧间里程计，没有子地图、回环或 IMU 融合；全局漂移由 AMCL 校正。里程计中的固定协方差只是仿真初值，不是完整的不确定度估计。当前重点是先验证定位导航链路，然后再分别改进这些算法。
 

@@ -54,11 +54,12 @@ public:
     nav2_core::GoalChecker * goal_checker) override;
 
 protected:
-  // 路径上离给定点最近的位置：横向距离，以及那里的路径朝向。
+  // 路径上离给定点最近的位置：横向距离、那里的路径朝向、以及沿路径到终点的剩余长度。
   struct PathMatch
   {
     double distance{0.0};
     double yaw{0.0};
+    double remaining{0.0};
   };
 
   geometry_msgs::msg::TwistStamped makeCmd(const geometry_msgs::msg::PoseStamped & pose) const;  // 零速度壳子
@@ -69,9 +70,17 @@ protected:
   PathMatch matchPath(double x, double y) const;
   // 点是否不可走：越界、代价 >= lethal_cost_ 都算撞上。未知格子暂当可走。
   bool inCollision(double wx, double wy) const;
+  // 车体轮廓是否撞上：把 footprint_ 的每个点按 yaw 旋转后逐个查，比只查中心可靠。
+  bool footprintCollides(double x, double y, double yaw) const;
+  // 直接读某点的代价，给"车心已经在致命格"的脱困判断用。
+  unsigned char costAt(double wx, double wy) const;
   // vx、wz 不变，向前滚 sim_time_ 秒，返回轨迹点。
   std::vector<Pose2D> projectTrajectory(
     const Pose2D & start, double vx, double wz) const;
+
+  // 车心已经在致命格、或正常采样全被判撞时的脱困：允许倒车，只看末端代价能不能降。
+  geometry_msgs::msg::Twist escapeTwist(
+    const Pose2D & start, const geometry_msgs::msg::Twist & velocity);
 
   // 采样、仿真、打分。一条都走不了就返回全零。
   geometry_msgs::msg::Twist computeBestTwist(
@@ -85,6 +94,7 @@ protected:
   std::string name_;                               // 插件实例名，对应 yaml 里 FollowPath
   nav_msgs::msg::Path global_plan_;                // 当前要跟的全局路径
   nav_msgs::msg::Path local_plan_;                 // 每周期转换到局部 costmap 坐标系
+  std::vector<double> plan_s_;                     // 沿 local_plan_ 的累计弧长，给剩余路径长度用
   rclcpp::Logger logger_{rclcpp::get_logger("MyDWAController")};
   rclcpp::Clock::SharedPtr clock_;
 
@@ -109,6 +119,11 @@ protected:
   double goal_weight_{1.0};        // 轨迹末端离终点多远，米
   double heading_weight_{0.5};     // 轨迹末端朝向和路径朝向差多少，弧度
   double velocity_weight_{0.2};    // 跑得多快。只用来在差不多的轨迹里挑顺的，不宜大
+  // 车心已经进致命格时允许小幅倒车脱困，否则零速死锁
+  double escape_reverse_speed_{0.25};
+  // 车体轮廓（base_footprint 下的多边形顶点），configure 时从代价地图读
+  std::vector<std::pair<double, double>> footprint_;
+  bool check_footprint_{true};     // 关掉就退回只查中心点
 };
 
 }  // namespace my_nav2_controller
