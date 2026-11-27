@@ -9,7 +9,7 @@
 ```bash
 source /opt/ros/humble/setup.bash
 export ROS_LOCALHOST_ONLY=1
-cd /home/hzy/个人项目/personal_nav2_robot
+# 进入克隆后的仓库根目录
 colcon build --symlink-install
 source install/setup.bash
 ros2 launch my_nav2_robot full_navigation.launch.py
@@ -27,7 +27,7 @@ GICP 的 small_gicp v1.0.0 在第一次编译时由 CMake FetchContent 下载。
 
 同一时间只运行一套 Gazebo。启动后等地图、激光和 Nav2 就绪，在 RViz 顶部使用 **Nav2 Goal** 指定位置和朝向。需要修正定位初值时使用 **2D Pose Estimate**。默认初始位姿按场景出生点设置，只在初始化时使用，导航过程不使用真值纠正 GICP。
 
-仿真默认使用 local_only:=true，只接收本机 ROS 数据，避免局域网其他仿真的 /clock、/map、TF 和模型描述串入。新开终端发送目标或读取话题时也先执行 export ROS_LOCALHOST_ONLY=1。有意连接远程 ROS 节点时才使用 local_only:=false。同机运行其他 ROS 项目时，可在相关终端统一设置独立的 ROS_DOMAIN_ID。
+仿真默认使用 local_only:=true，只接收本机 ROS 数据，避免局域网其他仿真的 /clock、/map、TF 和模型描述串入。新开终端发送目标或读取话题时也先 source install/setup.bash 并执行 export ROS_LOCALHOST_ONLY=1。有意连接远程 ROS 节点时才使用 local_only:=false。同机运行其他 ROS 项目时，可在相关终端统一设置独立的 ROS_DOMAIN_ID。
 
 无窗口且无 GPU / 显示服务时，改用 CPU 光线雷达：
 
@@ -123,7 +123,7 @@ ros2 run nav2_map_server map_saver_cli -f /tmp/my_nav2_map
 
 ## 包与实现
 
-- my_nav2_robot：URDF、Gazebo 世界、地图、launch、Nav2 参数、行为树、RViz。
+- my_nav2_robot：URDF、地图、launch、Nav2 参数、行为树、RViz。Gazebo 世界直接用 `turtlebot3_gazebo` 提供的 `turtlebot3_house.world`，本仓库不再自带世界文件。
 - my_nav2_frontend：先在底盘坐标系中过滤车身包围盒内的回波和低于 0.05 m 的地面点，再做 PCL VoxelGrid（0.15 m）和 small_gicp 相邻帧配准。这是平地仿真的预处理，相关参数为 min_registration_height、self_filter_min、self_filter_max。订阅队列只保留最新一帧，避免计算繁忙时积压旧位姿。/lidar_odom 保留雷达原始累积位姿用于调试；/odom 是经过外参补偿和平面投影的底盘里程计。失败帧不更新参考帧、不发布新的导航位姿，下一次配准仍相对于最后成功帧。
 - my_nav2_planner：八邻域 A*，octile 启发函数，禁止斜穿墙角；代价 ≥253 的已知格子不可走，未知区暂时允许通过。
 - my_nav2_smoother：以原路径点为变量，固定首尾，对参考偏差和二阶差分建立二次代价；x、y 分别用高斯消元求解，然后作为三次 B 样条控制点。曲线碰撞时回退，输出间距 0.1 m。
