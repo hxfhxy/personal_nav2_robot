@@ -1,10 +1,6 @@
 <!--
-  Humble official default BT.
-  Replans at 1 Hz and runs recovery actions.
-
-  Swap plugins later by changing these IDs to match nav2_params.yaml:
-    planner_id:     GridBased   (later: MyAStar / MyRRTStar / ...)
-    controller_id:  FollowPath  (later: MyDWA / MyTEB / ...)
+  Humble navigation BT with SmoothPath between planning and control.
+  Replans at 1 Hz; instance IDs stay fixed while launch selects plugin classes.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -16,7 +12,7 @@
               <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
             </RecoveryNode>
-            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="qp_smoother"/>
+            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SmoothPath"/>
           </Sequence>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">

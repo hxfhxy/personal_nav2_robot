@@ -1,4 +1,4 @@
-// MyQpSmoother：Nav2 路径平滑插件（对应 yaml 里的 qp_smoother）。
+// MyQpSmoother：Nav2 路径平滑插件（对应 yaml 里的 SmoothPath）。
 // 声明 smooth 入口，以及 QP 求解、碰撞检查、B 样条采样这些内部步骤。
 
 #ifndef MY_NAV2_SMOOTHER__QP_SMOOTHER_HPP_

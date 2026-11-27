@@ -15,7 +15,7 @@
               </ReactiveSequence>
               <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
             </RecoveryNode>
-            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="qp_smoother"/>
+            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SmoothPath"/>
           </Sequence>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">

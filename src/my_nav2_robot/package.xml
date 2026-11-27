@@ -4,8 +4,7 @@
   <name>my_nav2_robot</name>
   <version>0.1.0</version>
   <description>
-    Humble bringup for a minimal differential-drive robot using official Nav2 plugins.
-    Later custom planner/controller/BT packages can be swapped in via YAML and BT XML.
+    Differential-drive simulation with GICP odometry, AMCL and switchable Nav2 plugins.
   </description>
   <maintainer email="hzy@todo.todo">zy</maintainer>
   <license>Apache-2.0</license>
@@ -13,6 +12,9 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
@@ -43,6 +45,7 @@
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_rviz_plugins</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

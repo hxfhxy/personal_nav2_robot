@@ -31,7 +31,7 @@ void MyQpSmoother::configure(
   logger_ = node->get_logger();
   clock_ = node->get_clock();
 
-  // 参数名带插件实例前缀，对应 yaml 里 qp_smoother 下面的键
+  // 参数名带插件实例前缀，对应 yaml 里 SmoothPath 下面的键
   auto declare = [&](const std::string & key, auto value) {
       nav2_util::declare_parameter_if_not_declared(
         node, name + "." + key, rclcpp::ParameterValue(value));
