@@ -17,6 +17,12 @@
   <depend>tf2_eigen</depend>
   <depend>pcl_conversions</depend>
   <build_depend>libpcl-all-dev</build_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>ament_index_python</test_depend>
+  <test_depend>sensor_msgs_py</test_depend>
+  <test_depend>std_msgs</test_depend>
+  <test_depend>tf2_msgs</test_depend>
+  <test_depend>python3-numpy</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

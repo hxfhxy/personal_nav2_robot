@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="my_nav2_robot">
+  <xacro:arg name="lidar_type" default="gpu_ray"/>
 
   <!-- Minimal two-wheel differential drive + caster + 16-beam 3D lidar.
        base_link sits at axle height so the chassis box does not rest on the ground. -->
@@ -172,7 +173,7 @@
     <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
       <ros>
         <remapping>cmd_vel:=/cmd_vel</remapping>
-        <remapping>odom:=/odom</remapping>
+        <remapping>odom:=/wheel_odom</remapping>
       </ros>
       <update_rate>50</update_rate>
       <left_joint>left_wheel_joint</left_joint>
@@ -184,8 +185,7 @@
       <odometry_frame>odom</odometry_frame>
       <robot_base_frame>base_footprint</robot_base_frame>
       <publish_odom>true</publish_odom>
-      <!-- TF comes from the ground-truth pose below. Wheel odometry slips, and with
-           map locked to odom that slip drags laser hits off the static map. -->
+      <!-- Only the selected odometry provider publishes /odom and the base TF. -->
       <publish_odom_tf>false</publish_odom_tf>
       <publish_wheel_tf>false</publish_wheel_tf>
     </plugin>
@@ -216,7 +216,7 @@
   </gazebo>
 
   <gazebo reference="laser_link">
-    <sensor type="gpu_lidar" name="lidar">
+    <sensor type="$(arg lidar_type)" name="lidar">
       <pose>0 0 0 0 0 0</pose>
       <visualize>false</visualize>
       <always_on>true</always_on>
@@ -247,6 +247,14 @@
           <remapping>~/out:=/points</remapping>
         </ros>
         <output_type>sensor_msgs/PointCloud2</output_type>
+        <frame_name>laser_link</frame_name>
+      </plugin>
+      <!-- 同一个传感器的中心线供 AMCL / slam_toolbox 使用，不额外模拟一颗雷达。 -->
+      <plugin name="gazebo_ros_scan_sensor" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=/scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
         <frame_name>laser_link</frame_name>
       </plugin>
     </sensor>

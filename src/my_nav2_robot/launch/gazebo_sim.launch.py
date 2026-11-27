@@ -1,4 +1,4 @@
-"""启动 Gazebo Classic、加载 URDF、把车生成到指定位置，并发布真值 TF。
+"""启动 Gazebo Classic、加载 URDF，并选择 GICP 或真值里程计。
 
 不含地图和 Nav2，可以单独用来验证模型、雷达和 TF 是否正常。
 """
@@ -7,10 +7,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import AppendEnvironmentVariable, DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -27,8 +27,11 @@ def generate_launch_description():
     x_pose = LaunchConfiguration('x_pose')
     y_pose = LaunchConfiguration('y_pose')
     z_pose = LaunchConfiguration('z_pose')
+    odom_source = LaunchConfiguration('odom_source')
+    lidar_type = LaunchConfiguration('lidar_type')
 
-    robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
+    robot_description = ParameterValue(
+        Command(['xacro ', xacro_file, ' lidar_type:=', lidar_type]), value_type=str)
 
     # 同一时间只能有一个 gzserver，旧进程占着端口时新的会马上退出
     gzserver = IncludeLaunchDescription(
@@ -54,13 +57,20 @@ def generate_launch_description():
         }],
         output='screen',
     )
-    # 用 Gazebo 真值位姿发 odom -> base_footprint，替掉会打滑的轮式里程计
+    # 二选一，避免多个节点竞争 odom -> base_footprint。
     ground_truth_tf = Node(
         package='my_nav2_robot',
         executable='ground_truth_tf.py',
         name='ground_truth_tf',
         parameters=[{'use_sim_time': use_sim_time}],
         output='screen',
+        condition=IfCondition(PythonExpression(["'", odom_source, "' == 'ground_truth'"])),
+    )
+    gicp_frontend = Node(
+        package='my_nav2_frontend', executable='gicp_frontend', name='gicp_frontend',
+        parameters=[{'use_sim_time': use_sim_time, 'publish_navigation_odom': True}],
+        output='screen',
+        condition=IfCondition(PythonExpression(["'", odom_source, "' == 'gicp'"])),
     )
     spawn_entity = Node(
         package='gazebo_ros',
@@ -91,13 +101,23 @@ def generate_launch_description():
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('local_only', default_value='true', choices=['true', 'false']),
+        SetEnvironmentVariable('ROS_LOCALHOST_ONLY', PythonExpression([
+            "'1' if '", LaunchConfiguration('local_only'), "' == 'true' else '0'"])),
         DeclareLaunchArgument('x_pose', default_value='0.0'),
         DeclareLaunchArgument('y_pose', default_value='0.0'),
         DeclareLaunchArgument('z_pose', default_value='0.01'),
+        DeclareLaunchArgument('odom_source', default_value='ground_truth',
+                              choices=['gicp', 'ground_truth']),
+        DeclareLaunchArgument('lidar_type', default_value='gpu_ray', choices=['gpu_ray', 'ray']),
+        # ROS 环境未必 source 过 Gazebo setup.sh；house 的 model://ground_plane 必须可解析。
+        AppendEnvironmentVariable('GAZEBO_MODEL_PATH', '/usr/share/gazebo-11/models'),
+        AppendEnvironmentVariable('GAZEBO_RESOURCE_PATH', '/usr/share/gazebo-11'),
         gzserver,
         gzclient,
         robot_state_publisher,
         ground_truth_tf,
+        gicp_frontend,
         spawn_entity,
         rviz_node,
     ])

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(my_nav2_frontend)
 
+# small_gicp 的模板实现编译在本节点里；未指定构建类型时不能以 -O0 运行实时配准。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
